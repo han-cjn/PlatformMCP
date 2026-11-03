@@ -1,0 +1,19 @@
+# 凭据与本地配置(示例文件 .env.example / config.example.json 保留入库)
+.env
+.env.*
+!.env.example
+config.json
+
+# 依赖与构建
+node_modules/
+
+# 日志与临时文件
+*.log
+
+# 本地持久化 DB
+*.db
+*.db-wal
+*.db-shm
+
+# macOS
+.DS_Store

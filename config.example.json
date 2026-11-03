@@ -1,0 +1,65 @@
+{
+  "db_path": "hub.db",
+  "workers": 4,
+  "push_targets": {
+    "feishu": "$FEISHU_CHAT_ID",
+    "dingtalk": "$DINGTALK_OPEN_CONVERSATION_ID",
+    "wecom": "$WECOM_CHAT_ID"
+  },
+  "report": {
+    "enabled": true,
+    "cron": "0 18 * * *",
+    "timezone": "Asia/Shanghai",
+    "backfill_hours": 24,
+    "created_field": "创建时间",
+    "push_platforms": ["wecom"]
+  },
+  "servers": [
+    {
+      "name": "feishu",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y", "@larksuiteoapi/lark-mcp", "mcp",
+        "-a", "$FEISHU_APP_ID",
+        "-s", "$FEISHU_APP_SECRET",
+        "-p", "preset.base.default,preset.im.default"
+      ]
+    },
+    {
+      "name": "dingtalk",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "dingtalk-mcp@latest"],
+      "env": ["DINGTALK_Client_ID", "DINGTALK_Client_Secret", "ACTIVE_PROFILES"],
+      "env_prefixes": ["DINGTALK"]
+    },
+    {
+      "name": "tencent-docs",
+      "transport": "http",
+      "url": "https://docs.qq.com/openapi/mcp",
+      "headers": { "Authorization": "$TENCENT_DOCS_TOKEN" }
+    },
+    {
+      "name": "wecom",
+      "transport": "stdio",
+      "command": "node",
+      "args": ["adapters/wecom-aibot-mcp/server.js"],
+      "env": ["WECOM_BOT_ID", "WECOM_BOT_SECRET", "HUB_EVENT_URL", "HUB_EVENT_SECRET"],
+      "env_prefixes": ["WECOM_"]
+    }
+  ],
+  "routes": {
+    "im.send_text": {
+      "feishu": "im_v1_message_create",
+      "dingtalk": "sendMessageToGroupByRobot",
+      "wecom": "wecom_send_text"
+    },
+    "table.query": {
+      "feishu": "bitable_v1_appTableRecord_search"
+    },
+    "doc.create": {
+      "tencent-docs": "doc.create_with_markdown"
+    }
+  }
+}
