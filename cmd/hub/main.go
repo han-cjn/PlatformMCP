@@ -5,6 +5,7 @@
 package main
 
 import (
+	"strings"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,7 @@ func main() {
 	onboardPlatform := flag.String("onboard", "", "进入平台接入向导(如 -onboard feishu):引导→校验→写.env→热重载")
 	onboardBrowser := flag.Bool("onboard-browser", false, "向导启用浏览器执行器(需 Chrome 以 --remote-debugging-port=9222 启动并已登录平台)")
 	onboardVerify := flag.Bool("onboard-verify-only", false, "配合 -onboard:跳过向导,直接用现有凭据做真连校验+写盘+热重载(日常体检)")
+	sseAddr := flag.String("sse", "", "以常驻 HTTP 服务暴露 MCP(如 -sse 127.0.0.1:9781):/sse 兼容 SSE 客户端,/mcp 走 StreamableHTTP;为空则 stdio 模式")
 	flag.Parse()
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil))) // 日志走 stderr,stdout 留给 MCP 协议
 
@@ -329,9 +331,31 @@ func main() {
 	// 内置 cron 调度(表达式/时区/开关走 config.json 的 report 段)
 	scheduler := report.StartScheduler(ctx, pipeline)
 
-	// stdio 主循环;父进程关闭 stdin 或收到信号时退出
+	// MCP 服务出口:stdio(嵌入宿主进程)或常驻 HTTP(SSE + StreamableHTTP,供多客户端接入)
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- server.ServeStdio(hub) }()
+	if *sseAddr != "" {
+		if !strings.HasPrefix(*sseAddr, "127.0.0.1:") && !strings.HasPrefix(*sseAddr, "localhost:") {
+			slog.Warn("⚠️ -sse 绑定非回环地址:MCP 端点无鉴权,暴露到网络有风险,建议仅本机使用", "addr", *sseAddr)
+		}
+		mux := http.NewServeMux()
+		sseSrv := server.NewSSEServer(hub, server.WithSSEEndpoint("/sse"))     // 旧 SSE 客户端
+		stSrv := server.NewStreamableHTTPServer(hub)                          // 新 StreamableHTTP 客户端
+		mux.Handle("/", sseSrv)  // 兜底:处理 /sse 与其 message 回传路径
+		mux.Handle("/mcp", stSrv)
+		mcpHTTP := &http.Server{Addr: *sseAddr, Handler: mux}
+		go func() {
+			slog.Info("MCP Hub HTTP 服务启动", "addr", *sseAddr, "sse", "http://"+*sseAddr+"/sse", "streamable", "http://"+*sseAddr+"/mcp")
+			serveErr <- mcpHTTP.ListenAndServe()
+		}()
+		// 退出时关闭 MCP HTTP
+		defer func() {
+			shCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = mcpHTTP.Shutdown(shCtx)
+		}()
+	} else {
+		go func() { serveErr <- server.ServeStdio(hub) }() // stdio 主循环;父进程关闭 stdin 时退出
+	}
 	select {
 	case err := <-serveErr:
 		if err != nil {
