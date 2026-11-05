@@ -296,3 +296,59 @@ func (m *Manager) Close() {
 		}
 	}
 }
+
+// Reload 热重载单个平台:关闭旧连接,用新配置(新凭据)重新挂载。
+// 供 onboard 收尾链使用——写完 .env 后无需重启进程。
+func (m *Manager) Reload(ctx context.Context, sc config.ServerConfig) error {
+	// 1. 摘除旧连接与该平台全部工具
+	m.mu.Lock()
+	if old, ok := m.clients[sc.Name]; ok {
+		if err := old.Close(); err != nil {
+			slog.Warn("热重载:关闭旧连接失败", "platform", sc.Name, "err", err)
+		}
+		delete(m.clients, sc.Name)
+	}
+	kept := m.tools[:0]
+	for _, t := range m.tools {
+		if t.Platform != sc.Name {
+			kept = append(kept, t)
+		}
+	}
+	m.tools = kept
+	m.mu.Unlock()
+
+	// 2. 用新环境重新连接(stdio 的 buildEnv 在 connect 时读取宿主机环境,
+	//    因此调用方需先 Setenv;http 的 headers 展开在 config.Load,调用方需重载配置传入)
+	c, err := connect(ctx, sc)
+	if err != nil {
+		h := m.health
+		h.SetMounted(sc.Name, false)
+		h.SetError(sc.Name, "热重载挂载失败: "+err.Error())
+		return err
+	}
+	tools, err := c.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		c.Close()
+		m.health.SetMounted(sc.Name, false)
+		m.health.SetError(sc.Name, "热重载 tools/list 失败: "+err.Error())
+		return err
+	}
+
+	// 3. 装配新连接与工具
+	m.mu.Lock()
+	m.clients[sc.Name] = c
+	for _, t := range tools.Tools {
+		m.tools = append(m.tools, Tool{
+			Platform:    sc.Name,
+			Name:        t.Name,
+			ExposedName: sc.Name + "." + t.Name,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
+		})
+	}
+	m.mu.Unlock()
+	m.health.SetMounted(sc.Name, true)
+	m.health.SetError(sc.Name, "")
+	slog.Info("平台热重载成功", "platform", sc.Name, "tools", len(tools.Tools))
+	return nil
+}

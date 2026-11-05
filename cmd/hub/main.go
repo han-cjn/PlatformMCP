@@ -24,6 +24,7 @@ import (
 	"github.com/example/mcp-hub/internal/config"
 	"github.com/example/mcp-hub/internal/event"
 	"github.com/example/mcp-hub/internal/health"
+	"github.com/example/mcp-hub/internal/onboard"
 	"github.com/example/mcp-hub/internal/report"
 	"github.com/example/mcp-hub/internal/semantic"
 	"github.com/example/mcp-hub/internal/store"
@@ -35,6 +36,9 @@ func main() {
 	configPath := flag.String("config", "config.json", "配置文件路径")
 	runReport := flag.Bool("run-report", false, "手动执行一次日报(M3 场景 B)后退出,便于验收/补跑")
 	reportDate := flag.String("report-date", "", "配合 -run-report 指定归属日期(YYYY-MM-DD),默认今天")
+	onboardPlatform := flag.String("onboard", "", "进入平台接入向导(如 -onboard feishu):引导→校验→写.env→热重载")
+	onboardBrowser := flag.Bool("onboard-browser", false, "向导启用浏览器执行器(需 Chrome 以 --remote-debugging-port=9222 启动并已登录平台)")
+	onboardVerify := flag.Bool("onboard-verify-only", false, "配合 -onboard:跳过向导,直接用现有凭据做真连校验+写盘+热重载(日常体检)")
 	flag.Parse()
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil))) // 日志走 stderr,stdout 留给 MCP 协议
 
@@ -77,6 +81,12 @@ func main() {
 
 	// P1-3:路由表与真实工具启动自检,不一致按 ERROR 输出并标注 degraded
 	routeIssues := mgr.ValidateRoutes(cfg.Routes, hr)
+
+	// 接入向导模式:引导→真连校验→写 .env→热重载(完成即退出,不启动事件桥/stdio 服务)
+	if *onboardPlatform != "" {
+		runOnboard(ctx, *onboardPlatform, *onboardBrowser, *onboardVerify, *configPath, cfg, hr, mgr)
+		return
+	}
 
 	hub := server.NewMCPServer("mcp-hub", "0.2.0", server.WithToolCapabilities(false))
 
@@ -379,4 +389,47 @@ func errStr(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// runOnboard 接入向导入口:完成后重载配置(http headers 需重新展开)+热重载挂载+路由自检+体检表。
+func runOnboard(ctx context.Context, platform string, useBrowser, verifyOnly bool, configPath string, cfg *config.Config, hr *health.Registry, mgr *adapter.Manager) {
+	p, ok := onboard.FindPortal(platform)
+	if !ok {
+		slog.Error("未知平台,可选: feishu / dingtalk / wecom / tencent-docs", "platform", platform)
+		os.Exit(1)
+	}
+	opts := onboard.Options{
+		Browser:    useBrowser,
+		VerifyOnly: verifyOnly,
+		Reload: func(env map[string]string) error {
+			// http 类平台(如 tencent-docs)的 headers 展开发生在 config.Load,
+			// 写盘+Setenv 之后必须重新 Load 才能带上新 Token
+			fresh, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			for _, sc := range fresh.Servers {
+				if sc.Name == platform {
+					return mgr.Reload(ctx, sc)
+				}
+			}
+			return fmt.Errorf("config.json 中找不到平台 %s 的 servers 定义", platform)
+		},
+	}
+	if err := onboard.Run(p, opts); err != nil {
+		slog.Error("接入向导未完成", "platform", platform, "err", err)
+		os.Exit(1)
+	}
+	// 收尾:路由自检 + 体检表(热重载后的最新状态)
+	fresh, err := config.Load(configPath)
+	if err == nil {
+		cfg = fresh
+	}
+	routeIssues := mgr.ValidateRoutes(cfg.Routes, hr)
+	// 凭据体检:onboard 模式提前退出,这里按环境变量统一标注所有平台
+	hr.SetCredentials("feishu", os.Getenv("FEISHU_APP_ID") != "" && os.Getenv("FEISHU_APP_SECRET") != "")
+	hr.SetCredentials("dingtalk", os.Getenv("DINGTALK_Client_ID") != "" && os.Getenv("DINGTALK_Client_Secret") != "")
+	hr.SetCredentials("wecom", os.Getenv("WECOM_BOT_ID") != "" && os.Getenv("WECOM_BOT_SECRET") != "")
+	hr.SetCredentials("tencent-docs", os.Getenv("TENCENT_DOCS_TOKEN") != "")
+	printHealthTable(hr, routeIssues)
 }
