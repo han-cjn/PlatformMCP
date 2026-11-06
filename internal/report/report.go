@@ -75,12 +75,12 @@ type Result struct {
 
 // Pipeline 日报联动主流程。
 type Pipeline struct {
-	St         *store.SQLiteStore
-	Down       Downstream
-	Cfg        config.ReportConfig
+	St          *store.SQLiteStore
+	Down        Downstream
+	Cfg         config.ReportConfig
 	PushTargets map[string]string
-	loc        *time.Location
-	maxRetries int
+	loc         *time.Location
+	maxRetries  int
 }
 
 // NewPipeline 构造;tz 为空用 Asia/Shanghai。
@@ -402,8 +402,8 @@ func (d *MCPDownstream) CreateDoc(ctx context.Context, title, markdown string) (
 // UpdateDoc 在同篇文档顶部插入最新快照(file_id 不变,链接不变)。
 func (d *MCPDownstream) UpdateDoc(ctx context.Context, fileID, markdown string) error {
 	_, err := d.Mgr.CallTool(ctx, "tencent-docs", "doc.insert_markdown", map[string]any{
-		"file_id": fileID,
-		"idx":     0,
+		"file_id":  fileID,
+		"idx":      0,
 		"markdown": fmt.Sprintf("## 🔄 更新于 %s\n\n%s", time.Now().Format(time.DateTime), markdown),
 	})
 	return err

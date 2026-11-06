@@ -15,8 +15,8 @@ func TestCheckRoutes(t *testing.T) {
 	}
 	routes := map[string]map[string]string{
 		"im.send_text": {
-			"feishu":   "im_v1_message_create", // 正常
-			"wecom":    "wecom_send_text",      // 工具不存在
+			"feishu":   "im_v1_message_create",      // 正常
+			"wecom":    "wecom_send_text",           // 工具不存在
 			"dingtalk": "sendMessageToGroupByRobot", // 平台未挂载
 		},
 	}

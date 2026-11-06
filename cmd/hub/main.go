@@ -5,7 +5,6 @@
 package main
 
 import (
-	"strings"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,7 +38,7 @@ func main() {
 	runReport := flag.Bool("run-report", false, "手动执行一次日报(M3 场景 B)后退出,便于验收/补跑")
 	reportDate := flag.String("report-date", "", "配合 -run-report 指定归属日期(YYYY-MM-DD),默认今天")
 	onboardPlatform := flag.String("onboard", "", "进入平台接入向导(如 -onboard feishu):引导→校验→写.env→热重载")
-	onboardBrowser := flag.Bool("onboard-browser", false, "向导启用浏览器执行器(需 Chrome 以 --remote-debugging-port=9222 启动并已登录平台)")
+	onboardBrowser := flag.Bool("onboard-browser", false, "向导启用浏览器执行器(需 Chrome 带 --remote-debugging-port=9222 --user-data-dir=~/.chrome-debug-profile 启动并已登录平台;临时 profile 会丢登录态,已做检测拦截)")
 	onboardVerify := flag.Bool("onboard-verify-only", false, "配合 -onboard:跳过向导,直接用现有凭据做真连校验+写盘+热重载(日常体检)")
 	sseAddr := flag.String("sse", "", "以常驻 HTTP 服务暴露 MCP(如 -sse 127.0.0.1:9781):/sse 兼容 SSE 客户端,/mcp 走 StreamableHTTP;为空则 stdio 模式")
 	flag.Parse()
@@ -169,7 +169,7 @@ func main() {
 			text, callErr := mgr.CallTool(ctx, platform, downstream, args)
 			_ = st.AppendAudit(store.AuditRecord{
 				Time: time.Now(), Tool: cap, Target: platform,
-				Summary: fmt.Sprintf("downstream=%s", downstream),
+				Summary:   fmt.Sprintf("downstream=%s", downstream),
 				Succeeded: callErr == nil, Err: errStr(callErr),
 			})
 			if callErr != nil {
@@ -338,9 +338,9 @@ func main() {
 			slog.Warn("⚠️ -sse 绑定非回环地址:MCP 端点无鉴权,暴露到网络有风险,建议仅本机使用", "addr", *sseAddr)
 		}
 		mux := http.NewServeMux()
-		sseSrv := server.NewSSEServer(hub, server.WithSSEEndpoint("/sse"))     // 旧 SSE 客户端
-		stSrv := server.NewStreamableHTTPServer(hub)                          // 新 StreamableHTTP 客户端
-		mux.Handle("/", sseSrv)  // 兜底:处理 /sse 与其 message 回传路径
+		sseSrv := server.NewSSEServer(hub, server.WithSSEEndpoint("/sse")) // 旧 SSE 客户端
+		stSrv := server.NewStreamableHTTPServer(hub)                       // 新 StreamableHTTP 客户端
+		mux.Handle("/", sseSrv)                                            // 兜底:处理 /sse 与其 message 回传路径
 		mux.Handle("/mcp", stSrv)
 		mcpHTTP := &http.Server{Addr: *sseAddr, Handler: mux}
 		go func() {

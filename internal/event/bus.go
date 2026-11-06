@@ -18,12 +18,12 @@ import (
 
 // Event 是平台无关的统一事件信封。
 type Event struct {
-	Platform  string         `json:"platform"`  // feishu / dingtalk / wecom / tencent-docs
-	Type      string         `json:"type"`      // im.message / im.message.unsupported / doc.updated / ...
-	SourceID  string         `json:"source_id"` // 平台侧业务唯一 ID(去重键):飞书 event_id、钉钉 msgId、企微 msgid
-	Payload   map[string]any `json:"payload"`   // 归一化后的载荷:chat_id / sender / text / msg_type ...
-	Received  time.Time      `json:"received"`
-	Attempts  int            `json:"attempts"`
+	Platform string         `json:"platform"`  // feishu / dingtalk / wecom / tencent-docs
+	Type     string         `json:"type"`      // im.message / im.message.unsupported / doc.updated / ...
+	SourceID string         `json:"source_id"` // 平台侧业务唯一 ID(去重键):飞书 event_id、钉钉 msgId、企微 msgid
+	Payload  map[string]any `json:"payload"`   // 归一化后的载荷:chat_id / sender / text / msg_type ...
+	Received time.Time      `json:"received"`
+	Attempts int            `json:"attempts"`
 }
 
 // Handler 处理事件;返回 error 会触发重试。

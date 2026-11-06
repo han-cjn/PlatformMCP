@@ -20,3 +20,8 @@ node_modules/
 
 # 调试脚本与临时验收工具(本地保留,不入库)
 debug/
+
+# 浏览器执行器截图产物(onboard 向导运行生成,含平台页面信息)
+feishu-*.png
+*-02-list.png
+*-03-done.png

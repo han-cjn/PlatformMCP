@@ -8,28 +8,28 @@ import (
 
 // Step 接入引导的一个步骤,两种执行器共用。
 type Step struct {
-	ID      string          // 步骤标识,如 "create-app"
-	Brief    string          // 终端一行说明
-	Detail  []string         // 展开说明:具体点哪里、勾哪些权限
-	URLs    []string        // 相关页面,手动模式下尝试 open
-	Browser *BrowserAction  // 浏览器执行器动作;nil 表示该步必须人工(如登录/审批)
-	Cred    bool            // true 表示此步骤要收集凭据(向导进入输入环节)
+	ID      string         // 步骤标识,如 "create-app"
+	Brief   string         // 终端一行说明
+	Detail  []string       // 展开说明:具体点哪里、勾哪些权限
+	URLs    []string       // 相关页面,手动模式下尝试 open
+	Browser *BrowserAction // 浏览器执行器动作;nil 表示该步必须人工(如登录/审批)
+	Cred    bool           // true 表示此步骤要收集凭据(向导进入输入环节)
 }
 
 // Cred 单个凭据的收集与校验定义。
 type Cred struct {
-	EnvKey   string
-	Label    string
-	Format   func(string) error // 非空格式校验(前缀/长度)
+	EnvKey string
+	Label  string
+	Format func(string) error // 非空格式校验(前缀/长度)
 }
 
 // Portal 一个平台的完整接入清单。
 type Portal struct {
-	Name      string
-	Title     string
-	URL       string
-	Steps     []Step
-	Validate  func(env map[string]string) error // 真连校验(见 validate.go)
+	Name     string
+	Title    string
+	URL      string
+	Steps    []Step
+	Validate func(env map[string]string) error // 真连校验(见 validate.go)
 }
 
 // BrowserAction 浏览器执行器动作序列;Script 为选择器版本标记(平台改版只改数据)。
@@ -39,24 +39,31 @@ type BrowserAction struct {
 }
 
 // Op 单个浏览器操作。Target 为 CSS 选择器;ExtractKey 表示把该元素文本
-// 存入凭据收集结果(envKey)。
+// 存入凭据收集结果(envKey)。Index 表示多匹配元素取第几个(0 起):飞书
+// Secret 的「显示」按钮是同 class 的第 2 个(第 1 个是复制)。
 type Op struct {
-	Kind         string // navigate / click / waitVisible / readText / fill / screenshot
-	Target       string // CSS 选择器或 URL(navigate)
-	Text         string // fill 的输入内容;支持 "$env:KEY" 引用已收集凭据
-	ExtractKey   string // readText 抽取到的值存入该 envKey
+	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / fill / screenshot
+	Target      string   // CSS 选择器或 URL 前缀(navigate/waitURL)
+	Text        string   // fill 的输入内容;支持 "$env:KEY" 引用已收集凭据
+	ExtractKey  string   // readText 抽取到的值存入该 envKey
+	Index       int      // 多匹配时取第几个;0 取首个
+	MaskRune    rune     // readText 识别的掩码字符(0 表示用 defaultMaskRune)
+	URLExcludes []string // waitURL 命中需排除的 URL 片段(过滤分页/搜索等假命中)
 }
+
+// defaultMaskRune 飞书/钉钉类平台凭据掩码的默认字符(U+2217 ASTERISK OPERATOR)。
+const defaultMaskRune = '\u2217'
 
 // ---- 格式校验(纯函数,单测覆盖) ----
 
 var (
-	reFeishuAppID     = regexp.MustCompile(`^cli_[A-Za-z0-9]+$`)
-	reFeishuSecret    = regexp.MustCompile(`^[A-Za-z0-9]{16,}$`)
-	reDingKey         = regexp.MustCompile(`^ding[A-Za-z0-9]+$`)
-	reDingSecret      = regexp.MustCompile(`^[A-Za-z0-9_-]{16,}$`)
-	reWeComID         = regexp.MustCompile(`^[A-Za-z0-9_-]{6,}$`)
-	reWeComSecret     = regexp.MustCompile(`^[A-Za-z0-9_-]{16,}$`)
-	reTencentToken    = regexp.MustCompile(`^[A-Za-z0-9_.-]{20,}$`)
+	reFeishuAppID  = regexp.MustCompile(`^cli_[A-Za-z0-9]+$`)
+	reFeishuSecret = regexp.MustCompile(`^[A-Za-z0-9]{16,}$`)
+	reDingKey      = regexp.MustCompile(`^ding[A-Za-z0-9]+$`)
+	reDingSecret   = regexp.MustCompile(`^[A-Za-z0-9_-]{16,}$`)
+	reWeComID      = regexp.MustCompile(`^[A-Za-z0-9_-]{6,}$`)
+	reWeComSecret  = regexp.MustCompile(`^[A-Za-z0-9_-]{16,}$`)
+	reTencentToken = regexp.MustCompile(`^[A-Za-z0-9_.-]{20,}$`)
 )
 
 func nonEmpty(s string) error {
@@ -96,8 +103,8 @@ var Portals = map[string]*Portal{
 				Script: "feishu@2026-11",
 				Ops: []Op{
 					{Kind: "navigate", Target: "https://open.feishu.cn/app"},
-					{Kind: "waitVisible", Target: "button"},
-					{Kind: "screenshot", Target: "feishu-01-portal.png"}, // 落到截图由人工点创建
+					{Kind: "waitVisible", Target: ".data-test__create-app-button"}, // 2026-11 校准:创建按钮有稳定测试钩子
+					{Kind: "screenshot", Target: "feishu-01-create.png"},           // 表单填写留人工(平台有创建风控)
 				},
 			}},
 			{ID: "enable-perms", Brief: "开权限(与 Hub 功能一一对应)", Detail: []string{
@@ -112,7 +119,28 @@ var Portals = map[string]*Portal{
 				"若提示需管理员审批:找企业管理员在后台通过(此步无法自动化)",
 			}},
 			{ID: "collect-creds", Brief: "复制凭证基础信息中的 App ID / App Secret", Cred: true,
-				URLs: []string{"https://open.feishu.cn/app"}},
+				URLs: []string{"https://open.feishu.cn/app"},
+				// 2026-11 实测校准:详情页 baseinfo 的 App ID 明文在 .auth-info__appid .secret-code__code;
+				// Secret 按钮组 hover 才展开,点同 class 第 2 个按钮(第 1 个是复制)切换明文,抓完再点一次收回;
+				// readText 自带掩码重试。应用入口不自动点(用户可能多应用):截图后等用户点,waitURL 切到详情标签。
+				Browser: &BrowserAction{
+					Script: "feishu@2026-11",
+					Ops: []Op{
+						{Kind: "navigate", Target: "https://open.feishu.cn/app"},
+						{Kind: "waitVisible", Target: "[class*='app-card']"},
+						{Kind: "screenshot", Target: "feishu-02-list.png"},
+						{Kind: "waitURL", Target: "https://open.feishu.cn/app/",
+							// 只认 /app/<appId>/... 详情标签:排除列表页/创建页/分页参数等假命中
+							URLExcludes: []string{"/app/list", "/app/create", "/app/search"}},
+						{Kind: "waitVisible", Target: ".auth-info__appid .secret-code__code"},
+						{Kind: "readText", Target: ".auth-info__appid .secret-code__code", ExtractKey: "FEISHU_APP_ID"},
+						{Kind: "hover", Target: ".auth-info__secret"},                             // 按钮组 hover 展开
+						{Kind: "click", Target: ".auth-info__secret .secret-code__btn", Index: 1}, // 第 2 个=显示
+						{Kind: "readText", Target: ".auth-info__secret .secret-code__code", ExtractKey: "FEISHU_APP_SECRET"},
+						{Kind: "click", Target: ".auth-info__secret .secret-code__btn", Index: 1}, // 抓完收回隐藏
+						{Kind: "screenshot", Target: "feishu-03-done.png"},
+					},
+				}},
 		},
 		Validate: ValidateFeishu,
 	},

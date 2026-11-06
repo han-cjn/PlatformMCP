@@ -13,11 +13,11 @@ import (
 
 // Options 向导运行配置。
 type Options struct {
-	Browser   bool                          // 启用浏览器执行器(失败自动降级手动)
-	DebugURL  string                        // Chrome 调试端口,默认 http://127.0.0.1:9222
-	EnvPath   string                        // .env 路径,默认 ".env"
-	Reload    func(env map[string]string) error // 收尾:写完 .env+Setenv 后热重载该平台
-	VerifyOnly bool                         // 跳过向导:直接用当前环境变量做 真连校验+写盘+热重载(日常体检/验收用)
+	Browser    bool                              // 启用浏览器执行器(失败自动降级手动)
+	DebugURL   string                            // Chrome 调试端口,默认 http://127.0.0.1:9222
+	EnvPath    string                            // .env 路径,默认 ".env"
+	Reload     func(env map[string]string) error // 收尾:写完 .env+Setenv 后热重载该平台
+	VerifyOnly bool                              // 跳过向导:直接用当前环境变量做 真连校验+写盘+热重载(日常体检/验收用)
 }
 
 // Run 执行平台接入向导:逐步引导(手动/浏览器双执行器,可互相降级)

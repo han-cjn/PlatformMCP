@@ -13,13 +13,13 @@ import (
 
 // fakeDownstream 记录调用,可注入错误。
 type fakeDownstream struct {
-	records     []Record
-	fetchErr    error
-	createErr   error
-	created     []string // titles
-	updated     []string // file_ids
-	pushed      map[string][]string
-	docSeq      int
+	records   []Record
+	fetchErr  error
+	createErr error
+	created   []string // titles
+	updated   []string // file_ids
+	pushed    map[string][]string
+	docSeq    int
 }
 
 func (f *fakeDownstream) FetchRecords(context.Context) ([]Record, error) {

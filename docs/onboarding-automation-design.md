@@ -120,30 +120,81 @@ type Cred struct {
 
 ```
 # 前置:用户手动启动带调试端口的 Chrome 并登录平台(一次性动作)
-/Applications/Google\ Chrome.app/... --remote-debugging-port=9222
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.chrome-debug-profile" \
+  --profile-directory=Default
 
 hub onboard feishu --browser
 # 编排器:连接 9222 → 按清单 Steps 逐个执行 BrowserAction → 失败步骤当场降级手动
 ```
+
+> ⚠️ **`--user-data-dir` 必须显式指定为持久化目录，否则登录态会丢**（详见 §5.3）。
 
 `BrowserAction` 数据结构（选择器版本化，UI 变更只改数据）：
 
 ```go
 type BrowserAction struct {
     Script string        // 版本标记:"feishu@2026-11"
-    Ops    []Op          // 序列:navigate / click / waitVisible / readText / fill
+    Ops    []Op          // 序列:navigate / hover / click / waitVisible / waitURL / readText / fill / screenshot
 }
 // 凭据抽取:readText(选择器) → 直接进内存 → 写 .env
 // 不经用户剪贴板,不打印明文,回显只显示前4位+***
 ```
 
-### 5.3 降级矩阵
+### 5.3 Chrome 调试端口与登录态（重要踩坑）
+
+**现象**：按 §5.2 旧命令（只带 `--remote-debugging-port=9222`、不指定 `--user-data-dir`）启动 Chrome 后，
+发现飞书等平台**登录状态没了**，需要重新扫码登录。
+
+**根因**（Chrome 自身行为，与 Hub 代码无关）：
+
+1. 日常 Chrome 已在运行并占用**默认 profile**（`~/Library/Application Support/Google/Chrome`）
+2. 再带 `--remote-debugging-port` 启动时，Chrome 发现默认 profile 被占用，**静默新建一个临时 profile**
+   （落在 `/var/folders/...` 或 `.org.chromium.Chromium.*` 下），不复用原 profile
+3. rod 连上的是这个空 profile → **看不到任何已登录会话**
+4. 临时 profile 在进程退出后被系统回收 → 在其中做的登录**不会被保存**
+
+> 注意：这不是「登录态被清空」，原 profile 的 cookie 完好无损。是两个 profile 互相隔离造成的错觉。
+> 更需警惕的是**反过来的风险**：如果 Hub 把调试端口开在默认 profile 上，等于把用户日常浏览器的
+> 完整会话暴露给自动化脚本，边界不清。
+
+**修复**：调试端口必须配**独立且持久化**的 profile：
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.chrome-debug-profile" \
+  --profile-directory=Default
+```
+
+- 首次需在该窗口登录一次目标平台，登录态写入 `~/.chrome-debug-profile`，之后长期有效
+- 与日常 profile **完全隔离**：日常 Chrome 照常用，自动化脚本只碰这个专用 profile
+- 可长期保留这个专用 profile，仅存放待接入平台的登录态
+
+**代码层防护**：`resolveWebSocketURL` 读取 `/json/version` 的 `userDataDir`，
+若命中临时目录前缀（`/tmp/`、`/var/folders/`、`/private/tmp/`、`.org.chromium.`），
+**直接报错并打印上面的启动命令**，避免代填脚本跑到一半才发现会话是空的。
+判定逻辑抽为纯函数 `isEphemeralProfileDir`，单测覆盖。
+
+### 5.4 标签页边界
+
+执行器只操作自己创建的 `about:blank` 页（`initial` 字段）：
+
+- `navigate` 幂等：已有目标 URL 的标签则切换，不把用户当前页面导走
+- `waitURL` 会切到用户手动点开的详情页，`Close()` **只关 `initial`、绝不关用户页面**
+- 任何情况下都不调用 `rod.Browser.Close()`——它会发 CDP `Browser.close` 直接关掉用户的整个 Chrome
+
+### 5.5 降级矩阵
 
 | 失败场景 | 处置 |
 |---|---|
 | 连不上 9222（Chrome 未启动） | 提示启动命令，或切手动模式 |
+| **Chrome 使用临时 profile** | **直接报错并打印持久化 profile 启动命令**（见 §5.4） |
 | 选择器失效（平台改版） | 该步骤打印 Brief/Detail 手动说明，人工完成后回车继续；后续步骤不中断 |
 | 抽取的凭据校验失败 | 回退到终端输入重收 |
+| `readText` 读到掩码字符 | 重试 10 次×500ms，仍失败则该步降级手动（掩码字符可由 `Op.MaskRune` 覆盖） |
+| `waitURL` 60s 内无匹配标签 | 该步降级手动；命中需排除 `/app/list` 等假匹配（`Op.URLExcludes`） |
 
 ## 6. 共享收尾链（两种执行器合流）
 

@@ -190,3 +190,134 @@ func TestBrowserActionUnknownOp(t *testing.T) {
 		t.Fatalf("未知 op 应报错: %v", err)
 	}
 }
+
+// TestCloseNilSafe Close 需对 nil 执行器/已关的初始页幂等,不得 panic。
+func TestCloseNilSafe(t *testing.T) {
+	var bx *BrowserExecutor
+	bx.Close() // 不应 panic
+
+	empty := &BrowserExecutor{}
+	empty.Close()
+	empty.Close()
+}
+
+// TestMatchURLPrefix waitURL 前缀匹配:排除列表页自身与分页/搜索等假命中。
+func TestMatchURLPrefix(t *testing.T) {
+	const target = "https://open.feishu.cn/app/"
+	cases := []struct {
+		url      string
+		excludes []string
+		want     bool
+	}{
+		{"https://open.feishu.cn/app/", nil, false},                       // 列表页自身(不比 target 长)
+		{"https://open.feishu.cn/app", nil, false},                        // 更短
+		{"https://open.feishu.cn/app/cli_abc123/baseinfo", nil, true},     // 详情页
+		{"https://open.feishu.cn/app/list", []string{"/app/list"}, false}, // 列表页排除
+		{"https://open.feishu.cn/app/cli_x/baseinfo", []string{"/app/list"}, true},
+		{"https://open.feishu.cn/app?page=2", []string{"/app/list"}, false}, // 不带斜杠,前缀不匹配
+		{"https://other.feishu.cn/app/cli_x", nil, false},                   // 域名不同
+		{"", nil, false},
+	}
+	for _, c := range cases {
+		if got := matchURLPrefix(c.url, target, c.excludes); got != c.want {
+			t.Errorf("matchURLPrefix(%q, excludes=%v) = %v, want %v", c.url, c.excludes, got, c.want)
+		}
+	}
+}
+
+// TestPickRejectsNegativeIndex Index<0 应返回错误而不是负索引 panic。
+func TestPickRejectsNegativeIndex(t *testing.T) {
+	bx := &BrowserExecutor{}
+	if _, err := bx.pick(Op{Target: "div", Index: -1}); err == nil {
+		t.Fatal("负 Index 应返回错误")
+	}
+	// 未初始化页面也要给出明确错误而非 nil deref
+	if _, err := bx.pick(Op{Target: "div"}); err == nil {
+		t.Fatal("nil page 应返回错误")
+	}
+}
+
+// TestIsEphemeralProfileDir 临时 profile 判定:命中即拒绝,持久化目录放行。
+func TestIsEphemeralProfileDir(t *testing.T) {
+	cases := []struct {
+		dir  string
+		want bool
+	}{
+		{"/tmp/chrome-profile", true},
+		{"/private/tmp/abc", true},
+		{"/var/folders/x8/xyz/T/rod", true},
+		{"/private/var/folders/x8/xyz/T/rod", true},
+		{"/Users/hanyechao/.org.chromium.Chromium.abc123", true},
+		{"/Users/hanyechao/.chrome-debug-profile", false},
+		{"/Users/hanyechao/Library/Application Support/Google/Chrome", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isEphemeralProfileDir(c.dir); got != c.want {
+			t.Errorf("isEphemeralProfileDir(%q) = %v, want %v", c.dir, got, c.want)
+		}
+	}
+}
+
+// TestResolveWebSocketURLRejectsEphemeralProfile 临时 profile 应报错并带修复命令,
+// 不能让代填脚本跑到一半才发现登录态是空的。
+func TestResolveWebSocketURLRejectsEphemeralProfile(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/x","userDataDir":"/var/folders/tmp/rod"}`))
+	}))
+	defer srv.Close()
+
+	_, err := resolveWebSocketURL(srv.URL)
+	if err == nil {
+		t.Fatal("临时 profile 应返回错误")
+	}
+	if !strings.Contains(err.Error(), "临时 profile") || !strings.Contains(err.Error(), "user-data-dir") {
+		t.Fatalf("错误信息应含诊断与修复命令,实际: %v", err)
+	}
+}
+
+// TestResolveWebSocketURLAcceptsPersistentProfile 持久化 profile 正常返回 WS 地址。
+func TestResolveWebSocketURLAcceptsPersistentProfile(t *testing.T) {
+	const wantWS = "ws://127.0.0.1:9222/devtools/browser/ok"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/json/version" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"webSocketDebuggerUrl":"` + wantWS + `","userDataDir":"/Users/x/.chrome-debug-profile"}`))
+	}))
+	defer srv.Close()
+
+	got, err := resolveWebSocketURL(srv.URL)
+	if err != nil {
+		t.Fatalf("持久化 profile 不应报错: %v", err)
+	}
+	if got != wantWS {
+		t.Fatalf("WS 地址不符: got %q want %q", got, wantWS)
+	}
+}
+
+// TestResolveWebSocketURLMissingWS 缺 webSocketDebuggerUrl 时给出明确错误(不再打印 %!w(<nil>))。
+func TestResolveWebSocketURLMissingWS(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"userDataDir":"/Users/x/.chrome-debug-profile"}`))
+	}))
+	defer srv.Close()
+
+	_, err := resolveWebSocketURL(srv.URL)
+	if err == nil || !strings.Contains(err.Error(), "未返回 webSocketDebuggerUrl") {
+		t.Fatalf("应报缺少 WS 地址: %v", err)
+	}
+	if strings.Contains(err.Error(), "%!w(") {
+		t.Fatalf("错误格式化有误: %v", err)
+	}
+}
+
+// TestResolveWebSocketURLPassesThroughWS 调用方直接给 ws:// 时应原样返回,不做 HTTP 探测。
+func TestResolveWebSocketURLPassesThroughWS(t *testing.T) {
+	const ws = "ws://127.0.0.1:9222/devtools/browser/direct"
+	got, err := resolveWebSocketURL(ws)
+	if err != nil || got != ws {
+		t.Fatalf("ws 地址应原样透传: got %q err %v", got, err)
+	}
+}

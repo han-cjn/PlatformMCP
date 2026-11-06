@@ -137,8 +137,8 @@ func ValidateTencentDocs(env map[string]string) error {
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
 		"params": map[string]any{
 			"protocolVersion": "2024-11-05",
-			"capabilities":   map[string]any{},
-			"clientInfo":     map[string]string{"name": "hub-onboard", "version": "0"},
+			"capabilities":    map[string]any{},
+			"clientInfo":      map[string]string{"name": "hub-onboard", "version": "0"},
 		},
 	})
 	req, err := http.NewRequest(http.MethodPost, tencentMCPURL, bytes.NewReader(initBody))

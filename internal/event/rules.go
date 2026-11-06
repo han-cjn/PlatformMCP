@@ -56,8 +56,8 @@ func (r *RecordRule) Handle(ctx context.Context, evt Event) error {
 
 	fields := map[string]any{
 		r.Target.Field: content,
-		"来源平台":       evt.Platform,
-		"发送者":        sender,
+		"来源平台":         evt.Platform,
+		"发送者":          sender,
 	}
 	resp, err := r.Mgr.CallTool(ctx, "feishu", "bitable_v1_appTableRecord_create", map[string]any{
 		"path": map[string]any{
