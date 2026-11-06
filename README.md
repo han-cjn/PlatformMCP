@@ -104,6 +104,28 @@ go run ./cmd/hub -config config.json -onboard feishu
 go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 ```
 
+### 4. 接入 WorkBuddy（或其他 MCP 宿主）
+
+在 `~/.workbuddy/mcp.json` 的 `mcpServers` 中加入：
+
+```json
+"mcp-hub": {
+  "command": "/Users/hanyechao/hub/bin/hub",
+  "args": ["-config", "/Users/hanyechao/hub/config.json"],
+  "env": {
+    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/Users/hanyechao"
+  }
+}
+```
+
+要点：
+
+- **先 `make build`** 产出 `bin/hub`，stdio 模式用编译产物而非 `go run`（避免首次编译延迟触发宿主超时）
+- `env` 会**整体替换**进程环境：`PATH` 必须包含 node/npx 实际所在目录（Apple Silicon 为 `/opt/homebrew/bin`），`HOME` 必须存在（npx 缓存依赖 `~/.npm`）
+- 无需指定 `cwd`：Hub 启动后会自动把工作目录锚定到 `-config` 所在目录，`.env`、`db_path`、企微适配器相对路径均与宿主 cwd 解耦
+- 保存后到连接器管理页面对 `mcp-hub` 点「信任/启用」
+
 ## 统一语义层
 
 客户端不需要知道各平台 API 的差异，只写领域模型：

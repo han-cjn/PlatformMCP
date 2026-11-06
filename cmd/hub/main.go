@@ -10,10 +10,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -44,6 +46,23 @@ func main() {
 	sseAddr := flag.String("sse", "", "以常驻 HTTP 服务暴露 MCP(如 -sse 127.0.0.1:9781):/sse 兼容 SSE 客户端,/mcp 走 StreamableHTTP;为空则 stdio 模式")
 	flag.Parse()
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil))) // 日志走 stderr,stdout 留给 MCP 协议
+	log.SetOutput(os.Stderr) // 依赖库(如钉钉 Stream SDK)用标准 log 打印,重定向到 stderr 防污染 stdout 协议通道
+
+	// 嵌入宿主(如 WorkBuddy)以 stdio 拉起时,cwd 不可控:统一锚定到配置文件所在目录,
+	// 使 .env / db_path / adapters/wecom-aibot-mcp/server.js 等相对路径与启动 cwd 解耦。
+	cfgPathAbs, err := filepath.Abs(*configPath)
+	if err != nil {
+		slog.Error("配置路径解析失败", "path", *configPath, "err", err)
+		os.Exit(1)
+	}
+	configDir := filepath.Dir(cfgPathAbs)
+	if cwd, _ := os.Getwd(); cwd != configDir {
+		if err := os.Chdir(configDir); err != nil {
+			slog.Error("切换到配置目录失败", "dir", configDir, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("工作目录已锚定到配置目录", "dir", configDir)
+	}
 
 	// 优雅退出:SIGTERM/SIGINT 触发 drain(P2-7)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -58,7 +77,7 @@ func main() {
 			slog.Error(".env 加载失败", "err", err)
 		}
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load(cfgPathAbs)
 	if err != nil {
 		slog.Error("配置加载失败", "err", err)
 		os.Exit(1)
