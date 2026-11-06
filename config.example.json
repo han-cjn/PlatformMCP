@@ -1,6 +1,7 @@
 {
   "db_path": "hub.db",
   "workers": 4,
+  "default_platform_order": ["feishu", "wecom", "dingtalk"],
   "push_targets": {
     "feishu": "$FEISHU_CHAT_ID",
     "dingtalk": "$DINGTALK_OPEN_CONVERSATION_ID",

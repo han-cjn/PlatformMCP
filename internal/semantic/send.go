@@ -2,35 +2,29 @@ package semantic
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 
 	"github.com/example/mcp-hub/internal/adapter"
 )
 
-// SendText 按平台构造 im.send_text 的下游 payload 并发送,屏蔽三家入参结构差异。
+// SendText 发送纯文本消息(im.send_text 的便捷封装)。
+//
+// 保留此函数是为了不打断既有调用点(event 规则回执、日报推送),内部已改为
+// 走统一的声明式引擎:平台参数差异由 ImSendText 的 PlatformMapping 表达,
+// 不再有 switch platform 硬编码分支。
+//
+// reg 参数保留但不再用于解析下游工具名(路由已由能力定义内置);保留是为了
+// 不修改调用方签名。新代码请直接用 Invoke。
 func SendText(ctx context.Context, reg *Registry, mgr *adapter.Manager, platform, chatID, text string) (string, error) {
-	tool, err := reg.Resolve("im.send_text", platform)
+	text2, err := sendTextVia(ctx, mgr, platform, chatID, text)
+	return text2, err
+}
+
+// sendTextVia SendText 的实际实现,参数用 Caller 接口以便单测注入假下游。
+func sendTextVia(ctx context.Context, caller Caller, platform, chatID, text string) (string, error) {
+	res, err := Invoke(ctx, BuiltinCatalog(), caller, ImSendText.Name, platform,
+		map[string]any{"target": chatID, "text": text}, nil)
 	if err != nil {
 		return "", err
 	}
-	var args map[string]any
-	switch platform {
-	case "feishu":
-		content, _ := json.Marshal(map[string]string{"text": text})
-		args = map[string]any{
-			"params": map[string]any{"receive_id_type": "chat_id"},
-			"data":   map[string]any{"receive_id": chatID, "msg_type": "text", "content": string(content)},
-		}
-	case "dingtalk":
-		args = map[string]any{
-			"openConversationId": chatID,
-			"msgParam":           map[string]any{"title": "MCP Hub", "text": text},
-		}
-	case "wecom":
-		args = map[string]any{"chatid": chatID, "content": text}
-	default:
-		return "", fmt.Errorf("SendText 未支持平台 %q", platform)
-	}
-	return mgr.CallTool(ctx, platform, tool, args)
+	return res.Text, nil
 }

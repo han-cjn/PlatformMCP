@@ -7,21 +7,34 @@ config.json
 # 依赖与构建
 node_modules/
 
+# Go 编译产物(本地构建,不入库)
+hub
+*.exe
+
 # 日志与临时文件
 *.log
+*.tmp
+*.bak
+*.swp
+*~
 
 # 本地持久化 DB
 *.db
 *.db-wal
 *.db-shm
 
-# macOS
+# macOS / Windows
 .DS_Store
+Thumbs.db
+
+# IDE 配置(个人偏好,不强制统一)
+.vscode/
+.idea/
+.cursor/
 
 # 调试脚本与临时验收工具(本地保留,不入库)
 debug/
 
 # 浏览器执行器截图产物(onboard 向导运行生成,含平台页面信息)
-feishu-*.png
 *-02-list.png
 *-03-done.png

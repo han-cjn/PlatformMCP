@@ -11,7 +11,6 @@ package report
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -384,28 +383,25 @@ func (d *MCPDownstream) FetchRecords(ctx context.Context) ([]Record, error) {
 }
 
 // CreateDoc 经统一语义层 doc.create 创建 Markdown 文档,解析响应中的 file_id/url。
+// base64 编码等编码细节已由语义层 adapter 处理,这里只传领域入参。
 func (d *MCPDownstream) CreateDoc(ctx context.Context, title, markdown string) (string, string, error) {
-	tool, err := d.Reg.Resolve("doc.create", "tencent-docs")
+	res, err := semantic.Invoke(ctx, semantic.BuiltinCatalog(), d.Mgr, "doc.create", "tencent-docs",
+		map[string]any{"title": title, "markdown": markdown}, nil)
 	if err != nil {
 		return "", "", err
 	}
-	resp, err := d.Mgr.CallTool(ctx, "tencent-docs", tool, map[string]any{
-		"title":           title,
-		"base64_markdown": base64.StdEncoding.EncodeToString([]byte(markdown)),
-	})
-	if err != nil {
-		return "", "", err
-	}
-	return parseDocRef(resp)
+	return parseDocRef(res.Text)
 }
 
 // UpdateDoc 在同篇文档顶部插入最新快照(file_id 不变,链接不变)。
+// 走语义层 doc.append(position=0 即开头插入)。
 func (d *MCPDownstream) UpdateDoc(ctx context.Context, fileID, markdown string) error {
-	_, err := d.Mgr.CallTool(ctx, "tencent-docs", "doc.insert_markdown", map[string]any{
-		"file_id":  fileID,
-		"idx":      0,
-		"markdown": fmt.Sprintf("## 🔄 更新于 %s\n\n%s", time.Now().Format(time.DateTime), markdown),
-	})
+	_, err := semantic.Invoke(ctx, semantic.BuiltinCatalog(), d.Mgr, "doc.append", "tencent-docs",
+		map[string]any{
+			"doc_id":   fileID,
+			"position": 0,
+			"markdown": fmt.Sprintf("## 🔄 更新于 %s\n\n%s", time.Now().Format(time.DateTime), markdown),
+		}, nil)
 	return err
 }
 

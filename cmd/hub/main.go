@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -142,43 +143,19 @@ func main() {
 		return mcp.NewToolResultText(string(out)), nil
 	})
 
-	// 统一语义工具:capability 来自配置路由表,参数 = platform + JSON payload
-	for _, capability := range registry.Capabilities() {
-		cap := capability
-		hub.AddTool(mcp.NewTool(cap,
-			mcp.WithDescription(fmt.Sprintf("统一语义:%s(按 platform 路由到对应下游工具)", cap)),
-			mcp.WithString("platform", mcp.Required(), mcp.Description("目标平台:feishu / dingtalk / wecom / tencent-docs")),
-			mcp.WithString("payload", mcp.Required(), mcp.Description("下游工具参数,JSON 对象字符串")),
-		), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			platform, err := req.RequireString("platform")
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			payloadStr, err := req.RequireString("payload")
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			var args map[string]any
-			if err := json.Unmarshal([]byte(payloadStr), &args); err != nil {
-				return mcp.NewToolResultError("payload 非法 JSON: " + err.Error()), nil
-			}
-			downstream, err := registry.Resolve(cap, platform)
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			text, callErr := mgr.CallTool(ctx, platform, downstream, args)
-			_ = st.AppendAudit(store.AuditRecord{
-				Time: time.Now(), Tool: cap, Target: platform,
-				Summary:   fmt.Sprintf("downstream=%s", downstream),
-				Succeeded: callErr == nil, Err: errStr(callErr),
-			})
-			if callErr != nil {
-				return mcp.NewToolResultError(callErr.Error()), nil
-			}
-			return mcp.NewToolResultText(text), nil
-		})
-		slog.Info("统一语义工具已注册", "capability", cap)
+	// 统一语义工具:按能力定义生成领域字段 schema(客户端不再拼平台专属 payload)
+	capCat := semantic.BuiltinCatalog()
+	for _, cap := range capCat.All() {
+		toolOpts := capToolOptions(cap)
+		hub.AddTool(mcp.NewTool(cap.Name, toolOpts...),
+			capToolHandler(ctx, cap, mgr, hr, st, cfg))
+		slog.Info("统一语义工具已注册", "capability", cap.Name,
+			"platforms", cap.SupportedPlatforms())
 	}
+
+	// 能力矩阵自检:声明支持 vs 实际挂载,启动即暴露缺口
+	slog.Info("能力矩阵", "report", "\n"+semantic.MatrixReport(capCat,
+		[]string{"feishu", "dingtalk", "wecom", "tencent-docs"}, mgr.Platforms()))
 
 	// ===== 事件桥:Ingress(去重+落库即ACK)→ Dispatcher(worker 池)→ 规则 =====
 	dispatcher := event.NewDispatcher(st, cfg.Workers, 3)
@@ -413,6 +390,85 @@ func errStr(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// capToolOptions 按能力定义生成 MCP 工具参数 schema(领域字段 + 可选 platform)。
+// 客户端看到的是 target/text 这类领域字段,而不是各平台专属的 payload 结构。
+func capToolOptions(cap *semantic.Capability) []mcp.ToolOption {
+	opts := []mcp.ToolOption{
+		mcp.WithDescription(cap.Description),
+	}
+	// 字段按名字排序,保证工具 schema 稳定(便于客户端缓存与 diff)
+	names := make([]string, 0, len(cap.Schema))
+	for n := range cap.Schema {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	required := make(map[string]bool, len(cap.Required))
+	for _, r := range cap.Required {
+		required[r] = true
+	}
+	for _, n := range names {
+		spec := cap.Schema[n]
+		po := []mcp.PropertyOption{mcp.Description(spec.Desc)}
+		if required[n] {
+			po = append(po, mcp.Required())
+		}
+		if len(spec.Enum) > 0 {
+			po = append(po, mcp.Enum(spec.Enum...))
+		}
+		switch spec.Type {
+		case "number":
+			opts = append(opts, mcp.WithNumber(n, po...))
+		case "bool":
+			opts = append(opts, mcp.WithBoolean(n, po...))
+		case "object":
+			opts = append(opts, mcp.WithObject(n, po...))
+		case "array":
+			opts = append(opts, mcp.WithArray(n, po...))
+		default:
+			opts = append(opts, mcp.WithString(n, po...))
+		}
+	}
+	// 平台可选:省略时按 能力声明顺序 → 配置 default_platform_order → 字典序
+	opts = append(opts, mcp.WithString("platform",
+		mcp.Description("目标平台,可选值:"+strings.Join(cap.SupportedPlatforms(), " / ")+
+			";省略则自动选择第一个可用平台")))
+	return opts
+}
+
+// capToolHandler 生成语义工具的调用处理器:领域入参 → Invoke → 审计。
+func capToolHandler(ctx context.Context, cap *semantic.Capability, mgr *adapter.Manager,
+	hr *health.Registry, st store.Store, cfg *config.Config) server.ToolHandlerFunc {
+
+	return func(callCtx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		platform := req.GetString("platform", "")
+
+		// 收集领域入参:只取能力声明的字段,忽略 platform
+		domain := make(map[string]any, len(cap.Schema))
+		for name := range cap.Schema {
+			if v, ok := req.GetArguments()[name]; ok && v != nil {
+				domain[name] = v
+			}
+		}
+
+		res, err := semantic.Invoke(callCtx, semantic.BuiltinCatalog(), mgr, cap.Name,
+			platform, domain, cfg.DefaultPlatformOrder)
+		target := platform
+		if res != nil {
+			target = res.Platform
+		}
+		_ = st.AppendAudit(store.AuditRecord{
+			Time: time.Now(), Tool: cap.Name, Target: target,
+			Summary:   fmt.Sprintf("capability=%s", cap.Name),
+			Succeeded: err == nil, Err: errStr(err),
+		})
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		// 调用计数由 adapter.CallTool 内部完成(AddCall),此处不重复累加
+		return mcp.NewToolResultText(res.Text), nil
+	}
 }
 
 // runOnboard 接入向导入口:完成后重载配置(http headers 需重新展开)+热重载挂载+路由自检+体检表。

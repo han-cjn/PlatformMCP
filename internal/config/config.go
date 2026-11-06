@@ -33,6 +33,9 @@ type Config struct {
 	Workers int `json:"workers"`
 	// PushTargets M3 推送目标群:platform -> 会话 ID(P0-3,配置驱动,不再人工 @ 抓 ID)
 	PushTargets map[string]string `json:"push_targets"`
+	// DefaultPlatformOrder 语义调用未指定 platform 时的平台优先级(如 ["feishu","wecom","dingtalk"]);
+	// 为空则按能力支持平台的字典序选第一个可用者
+	DefaultPlatformOrder []string `json:"default_platform_order"`
 	// Report M3 场景 B:每日 Bitable 增量 → 腾讯文档日报 → 推 IM
 	Report ReportConfig `json:"report"`
 }
