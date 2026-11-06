@@ -119,7 +119,11 @@ type Cred struct {
 ### 5.2 运行形态
 
 ```
-# 前置:用户手动启动带调试端口的 Chrome 并登录平台(一次性动作)
+# 前置:启动带调试端口的 Chrome(已封装成脚本,推荐)
+./scripts/chrome-debug.sh            # 默认端口 9222
+./scripts/chrome-debug.sh 9333       # 自定义端口
+
+# 等价的手工命令(脚本内部即此参数)
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --remote-debugging-port=9222 \
   --user-data-dir="$HOME/.chrome-debug-profile" \
@@ -130,6 +134,7 @@ hub onboard feishu --browser
 ```
 
 > ⚠️ **`--user-data-dir` 必须显式指定为持久化目录，否则登录态会丢**（详见 §5.3）。
+> 首次使用需在脚本打开的窗口里登录一次目标平台，之后登录态长期保留。
 
 `BrowserAction` 数据结构（选择器版本化，UI 变更只改数据）：
 
