@@ -8,7 +8,9 @@ config.json
 node_modules/
 
 # Go 编译产物(本地构建,不入库)
-hub
+# 注意:必须带前导斜杠锚定根目录——裸写 hub 会误伤 cmd/hub/ 源码目录
+/hub
+/bin/
 *.exe
 
 # 日志与临时文件
