@@ -134,6 +134,25 @@ func main() {
 		return mcp.NewToolResultText(string(out)), nil
 	})
 
+	// 接入引导:缺凭据平台清单,供 Agent 弹选择框发起接入(简化"帮我接入飞书"类指令)
+	hub.AddTool(mcp.NewTool("hub.onboard.status",
+		mcp.WithDescription("检测各平台凭据配置状态:missing 为缺凭据的平台列表(空表示全部就绪),configured 为已配置列表;用户表达接入意图时先调此工具,再针对 missing 项引导"),
+	), func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		result := map[string]any{
+			"missing":    []string{},
+			"configured": []string{},
+		}
+		for _, p := range onboard.PlatformOrder() {
+			if len(onboard.MissingCreds(p)) > 0 {
+				result["missing"] = append(result["missing"].([]string), p)
+			} else {
+				result["configured"] = append(result["configured"].([]string), p)
+			}
+		}
+		out, _ := json.MarshalIndent(result, "", "  ")
+		return mcp.NewToolResultText(string(out)), nil
+	})
+
 	// P0-3:会话枚举——飞书实时拉取群列表,企微/钉钉来自消息帧沉淀的缓存
 	hub.AddTool(mcp.NewTool("hub.chats",
 		mcp.WithDescription("枚举可用会话:飞书走 im_v1_chat_list;企微/钉钉来自已接收消息帧缓存"),
