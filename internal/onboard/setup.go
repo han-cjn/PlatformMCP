@@ -22,14 +22,15 @@ type setupStage struct {
 // SetupResult 是 hub.onboard.setup 的返回:把「点进应用 → 创建应用 → 抓凭据 →
 // 开权限 → 发布」串成一次调用,每个阶段单独给状态,避免半成品被误报为成功。
 type SetupResult struct {
-	Platform   string         `json:"platform"`
-	Phase      string         `json:"phase"` // need_confirmation / done / partial / browser_missing / waiting_login / unsupported
-	AppURL     string         `json:"app_url,omitempty"`
-	Plan       []string       `json:"plan"`
-	Steps      []SetupStep    `json:"steps"`
-	Candidates []string       `json:"candidates,omitempty"`
-	Capture    *CaptureResult `json:"capture,omitempty"`
-	Next       string         `json:"next"`
+	Platform   string           `json:"platform"`
+	Phase      string           `json:"phase"` // need_confirmation / done / partial / browser_missing / waiting_login / unsupported
+	AppURL     string           `json:"app_url,omitempty"`
+	Plan       []string         `json:"plan"`
+	Steps      []SetupStep      `json:"steps"`
+	Candidates []string         `json:"candidates,omitempty"`
+	Capture    *CaptureResult   `json:"capture,omitempty"`
+	PermProbe  *PermProbeResult `json:"perm_probe,omitempty"`
+	Next       string           `json:"next"`
 }
 
 // SetupStep 单个阶段的执行结果。
@@ -50,10 +51,12 @@ type InspectResult struct {
 }
 
 // Setup 端到端完成应用接入。用户只需在浏览器里登录并确认一次动作清单,
-// 之后点应用、创建应用、抓凭据、开权限、发布版本都由 Hub 在调试 Chrome 里代做。
+// 之后点应用/创建应用/抓凭据由调试 Chrome 代做,权限先用只读 API 探针验证
+// (必要时才进 UI 开通),发布版本独立执行。
 //
 // 安全边界:任何有副作用的动作(创建应用、开通权限、提交版本)都受 confirmed 门
-// 保护;任一步选择器未命中即停止后续提交并附页面候选元素,绝不静默重试。
+// 保护;权限优先用只读 API 探针验证,单阶段选择器未命中只停该阶段、不阻断后续阶段,
+// 并附页面候选元素,绝不静默重试提交。
 func Setup(platform, appName string, confirmed bool, reload func(map[string]string) error) (*SetupResult, error) {
 	p, ok := FindPortal(platform)
 	if !ok {
@@ -132,24 +135,35 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 		res.Steps = append(res.Steps, SetupStep{ID: "capture", Status: cap.Phase, Message: cap.Next})
 	}
 
-	// 阶段 4/5:权限与版本发布。每个阶段先只读探测是否已达成(幂等),再做变更。
+	// 阶段 4/5:权限与版本发布。
+	// 权限先走只读 API 探针(A),只有平台明确报「权限不足」才进 UI 开通流程。
+	// 各阶段独立执行、独立记录(C):旧版遇第一个 selector_miss 就整体 return,
+	// 导致 enable_perms 失败时 publish 根本没被调用,却被误读成「平台侧已完成」。
+	probe := probePerms(platform)
+	res.PermProbe = &probe
 	for _, stage := range feishuSetupStages() {
-		step, candidates := runSetupStage(stage, p)
+		step, candidates := runSetupStage(stage, p, &probe)
 		res.Steps = append(res.Steps, step)
 		if len(candidates) > 0 {
 			res.Candidates = append(res.Candidates, candidates...)
 		}
-		if step.Status == "selector_miss" || step.Status == "browser_missing" {
-			res.Phase = "partial"
-			res.Next = "「" + stage.ID + "」未自动完成:" + step.Message +
-				"。页面候选元素已放在 candidates,请调用 hub.onboard.inspect 校准后重试;不要重复提交表单"
-			return res, nil
-		}
 	}
-
+	failed, skipped := setupStageOutcomes(res.Steps)
+	if len(failed) > 0 {
+		res.Phase = "partial"
+		res.Next = "以下阶段未自动完成: " + strings.Join(failed, "、") +
+			"。各阶段相互独立,已成功的阶段不会重跑;candidates 含页面候选元素(带标签/role)," +
+			"请调 hub.onboard.inspect 校准后只重试失败阶段,不要重复提交表单"
+		return res, nil
+	}
 	res.Phase = "done"
-	res.Next = "应用已自动打开/创建、凭据已写入并热重载,权限与版本发布阶段均已处理;" +
-		"请调 hub.health 确认 credentials=true / mounted=true。若某阶段为 already_done 表示平台侧原本已完成,未重复操作"
+	res.Next = "应用已自动打开/创建、凭据已写入并热重载;权限与版本发布阶段均已独立处理。" +
+		"请调 hub.health 确认 credentials=true / mounted=true。already_done=平台侧原本已完成;" +
+		"api_verified=权限 API 探针已通过、跳过 UI 开通;skipped=未能自动确认、未做任何变更"
+	if len(skipped) > 0 {
+		res.Next += "。注意以下阶段为跳过(未自动确认): " + strings.Join(skipped, "、") +
+			",详见对应 step.message,不要用 done 覆盖这些未验证项"
+	}
 	return res, nil
 }
 
@@ -219,12 +233,14 @@ func feishuSetupStages() []setupStage {
 		{
 			ID: "enable_perms",
 			Action: &BrowserAction{Script: "feishu@2026-11-perms", Ops: []Op{
-				{Kind: "click", Target: "a, li, div, span, [role=menuitem]", Match: "^\\s*权限管理\\s*$", Scope: "probe"},
+				// 先等菜单文本渲染出来(SPA 异步),再点:旧版直接 click 会在页面刚加载时 6s 超时
+				{Kind: "waitVisible", Target: menuCandidateSelector, Match: "^\\s*权限管理(?:\\s*\\d+)?\\s*$", Scope: "probe"},
+				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*权限管理(?:\\s*\\d+)?\\s*$", Scope: "probe"},
 				{Kind: "readPage", Scope: "probe"},
-				{Kind: "click", Target: "button, [role=button], a", Match: "^\\s*(开通权限|添加权限|申请权限|批量导入权限)\\s*$", Scope: "apply"},
+				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(开通权限|添加权限|申请权限|批量导入权限)\\s*$", Scope: "apply"},
 				{Kind: "fill", Target: "input[placeholder*='搜索'], input[type=text], textarea",
 					Text: strings.Join(defaultPerms, ", "), Scope: "apply"},
-				{Kind: "click", Target: "button, [role=button]", Match: "^\\s*(确定|确认|提交|开通)\\s*$", Scope: "apply"},
+				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(确定|确认|提交|开通)\\s*$", Scope: "apply"},
 			}},
 			Done: func(text string) bool {
 				for _, k := range defaultPerms {
@@ -238,15 +254,17 @@ func feishuSetupStages() []setupStage {
 		{
 			ID: "publish",
 			Action: &BrowserAction{Script: "feishu@2026-11-publish", Ops: []Op{
-				{Kind: "click", Target: "a, li, div, span, [role=menuitem]",
-					Match: "^\\s*(版本管理与发布|应用发布|版本管理)\\s*$", Scope: "probe"},
+				{Kind: "waitVisible", Target: menuCandidateSelector,
+					Match: "^\\s*(版本管理与发布|应用发布|版本管理)(?:\\s*\\d+)?\\s*$", Scope: "probe"},
+				{Kind: "click", Target: menuCandidateSelector,
+					Match: "^\\s*(版本管理与发布|应用发布|版本管理)(?:\\s*\\d+)?\\s*$", Scope: "probe"},
 				{Kind: "readPage", Scope: "probe"},
-				{Kind: "click", Target: "button, [role=button], a", Match: "^\\s*(创建版本|新建版本)\\s*$", Scope: "apply"},
+				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(创建版本|新建版本)\\s*$", Scope: "apply"},
 				{Kind: "fill", Target: "input[placeholder*='版本'], input[type=text], textarea", Text: "1.0.0", Scope: "apply"},
 				{Kind: "fill", Target: "textarea, input[placeholder*='说明'], input[placeholder*='描述']",
 					Text: "mcp-hub 接入自动发布", Scope: "apply"},
-				{Kind: "click", Target: "button, [role=button]", Match: "^\\s*(保存|确定|提交)\\s*$", Scope: "apply"},
-				{Kind: "click", Target: "button, [role=button]", Match: "^\\s*(申请发布|发布|提交发布)\\s*$", Scope: "apply"},
+				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(保存|确定|提交)\\s*$", Scope: "apply"},
+				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(申请发布|发布|提交发布)\\s*$", Scope: "apply"},
 			}},
 			Done: func(text string) bool {
 				// 飞书详情页/版本页在无需变更时会显示「当前修改均已发布」(见实测截图)
@@ -266,9 +284,40 @@ func opsForScope(act *BrowserAction, scope string) []Op {
 	return out
 }
 
+// setupStageOutcomes 汇总各阶段结果:单阶段失败只记它自己的 ID,
+// 不会掩盖其他阶段的成功,也不会中断后续阶段(C)。抽成纯函数便于单测覆盖。
+func setupStageOutcomes(steps []SetupStep) (failed, skipped []string) {
+	for _, s := range steps {
+		switch s.Status {
+		case "selector_miss", "browser_missing":
+			failed = append(failed, s.ID)
+		case "skipped", "unsupported":
+			skipped = append(skipped, s.ID)
+		}
+	}
+	return failed, skipped
+}
+
 // runSetupStage 先跑只读 probe 做幂等检测,未达成才跑有副作用的 apply。
 // 任一步失败立即停止并返回页面候选元素,绝不重试提交表单。
-func runSetupStage(stage setupStage, p *Portal) (SetupStep, []string) {
+//
+// enable_perms 阶段优先依据 API 探针短路(A):权限已可用或无法确认时不打开浏览器、
+// 不点任何按钮;只有 needs_perms(平台明确报权限不足)才进入 UI 开通流程。
+func runSetupStage(stage setupStage, p *Portal, probe *PermProbeResult) (SetupStep, []string) {
+	if stage.ID == "enable_perms" && probe != nil {
+		switch probe.Status {
+		case "api_ready":
+			return SetupStep{ID: stage.ID, Status: "api_verified",
+				Message: "权限 API 探针通过(" + strings.Join(probe.Checked, "、") +
+					"),跳过 UI 开通流程;未单独验证: " + strings.Join(probe.Unverified, "、")}, nil
+		case "no_credentials", "unknown", "unsupported":
+			return SetupStep{ID: stage.ID, Status: "skipped",
+				Message: "权限 API 探针未能确认(" + probe.Status + "): " + probe.Detail +
+					";为避免重复提交,不进入 UI 开通流程"}, nil
+		case "needs_perms":
+			// 平台明确报权限不足,继续走 UI 开通流程
+		}
+	}
 	bx, err := NewBrowserExecutor("")
 	if err != nil {
 		return SetupStep{ID: stage.ID, Status: "browser_missing", Message: err.Error()}, nil

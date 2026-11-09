@@ -194,6 +194,15 @@ func (bx *BrowserExecutor) runOp(op Op, creds map[string]string) error {
 	case "waitVisible":
 		// 必须有界:rod 的 Element 会无限重试到 ctx 结束,默认 ctx 没有 deadline。
 		// 选择器失效时(例如详情页里等列表页的 app-card)会永久卡住 MCP 调用。
+		// 带 Match 时走 pick(ElementR 自带 6s 重试),用来等 SPA 把菜单文本渲染出来,
+		// 而不是只等到任意一个 div 出现就继续。
+		if op.Match != "" {
+			return bx.safe(func() {
+				if _, err := bx.pick(op); err != nil {
+					panic(err)
+				}
+			})
+		}
 		return bx.safe(func() { bx.page.Timeout(browserOpTimeout).MustElement(op.Target) })
 	case "click":
 		return bx.safe(func() {

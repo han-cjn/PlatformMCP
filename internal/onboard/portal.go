@@ -56,6 +56,13 @@ type Op struct {
 // defaultMaskRune 飞书/钉钉类平台凭据掩码的默认字符(U+2217 ASTERISK OPERATOR)。
 const defaultMaskRune = '\u2217'
 
+// menuCandidateSelector 是「菜单/按钮」元素的统一候选选择器。
+//
+// probe/click 与 collectCandidates 必须共用同一份标签集合,否则会出现
+// 「inspect 候选里明明有『权限管理』、ElementR 却遍历不到该元素」的假超时
+// (2026-11-09 实测踩坑:probe 用 a/li/div/span,候选采集用 button/a/[role=button])。
+const menuCandidateSelector = "a, li, div, span, button, [role=menuitem], [role=button], [role=tab]"
+
 // ---- 格式校验(纯函数,单测覆盖) ----
 
 var (

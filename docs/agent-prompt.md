@@ -205,9 +205,13 @@
 
 当用户提到「接入」「配置平台」「添加集成」「setup」时:
 
-1. 先调用 `hub.onboard.status` 查看缺凭据的平台
-2. `missing` 非空 → 用选择框让用户挑选要接入的平台
-3. **用户选中后立即调用 `hub.onboard.start`**(参数 `platform` = 选中项)。
+1. 先调用 `hub.onboard.status`。它返回 `platforms`——**项目支持的全部平台**(能力清单从语义层能力矩阵动态生成),每项带 `id` / `name` / `credentials` / `setup_supported` / `browser_capture` / `capabilities` / `hint`
+2. **用选择框把 `platforms` 全量列出让用户挑选**,不要只列 `missing`,也不要自己编平台清单:
+   - 每项展示中文名 + 凭据状态(已配置 / 待接入) + 是否支持自动接入 + 可用能力
+   - **已配置的平台也要列出**(用户可能想重新接入、重新体检或切换)
+   - 选中项的 `id` 作为后续所有工具的 `platform` 参数
+   - 只有用户明确说"不接入"时才结束;不要因为 `missing` 为空就跳过选择框
+3. **用户选中后立即调用 `hub.onboard.start`**(参数 `platform` = 选中项的 `id`)。
    自动起调试 Chrome 并打开开放平台页面,**浏览器会真的弹出来**。
    **不要只把命令打印给用户,也不要让用户去终端跑脚本。**
    - 返回 `phase=ready_to_capture` → 用户已登录且已停在应用凭证页,
@@ -227,8 +231,15 @@
    - `phase=done` → 调 `hub.health` 确认 `credentials=true / mounted=true`,回报完成
    - `steps` 里出现 `already_done` → 平台侧原本已完成(如已显示「当前修改均已发布」),
      工具已跳过,**不要重复操作或让用户再点一次**
-   - `phase=partial` 且某步 `selector_miss` → 调用 `hub.onboard.inspect` 拿页面候选按钮/输入框,
-     把 `candidates` 与 `next` 转述给用户校准,**绝不自动重试提交表单**
+   - `steps` 里出现 `api_verified` → **权限 API 只读探针已通过,工具跳过了 UI 开通流程**。
+     按 `perm_probe.checked` / `perm_probe.unverified` 如实转述:只验证了群列表读权限,
+     `im:message` 发消息与 `bitable:app` 多维表格未单独验证,**不要说"三项权限都已开通"**;
+     需要确认时可让用户实际发一条消息或建一张表来实测
+   - `steps` 里出现 `skipped` → 权限探针未能确认(无凭据/网络异常),工具**没有做任何变更**,
+     按 `step.message` 如实告知,不要当成失败也不要当成完成
+   - `phase=partial` → **只有列在 `next` 里的阶段未自动完成,其他阶段已独立跑完**,
+     不要整体重跑。调用 `hub.onboard.inspect` 拿候选(带标签/role)与 `candidates` 一起转述,
+     **绝不自动重试提交表单**
    - `phase=unsupported`(非飞书) → 退回第 6 步只做 `capture`
    - `browser_missing` / `waiting_login` → 按 `next` 提示重试
 6. `hub.onboard.capture` 作为降级或单独抓凭据使用:读 App ID / Secret → 格式校验 →
@@ -238,14 +249,16 @@
    - 其他 phase → 转述 `message` 与 `next`,不要当成崩溃
 7. 只想单独建应用时才用 `hub.onboard.create_app`(`confirmed=false` 先返回 `need_confirmation`);
    `existing_apps` / `already_in_detail` / `selector_miss` 按 `next` 处理,**绝不重复提交创建表单**
-8. `missing` 为空 → 直接告知"四个平台凭据均已配置,无需接入"
+8. `missing` 为空时**仍按第 2 步弹出全量平台选择框**;用户表示无需改动后,
+   再告知"四个平台凭据均已配置"
 
 **边界说明**:
 
 - 登录(扫码/验证码)与管理员审批**必须人工在浏览器里点**;
   点应用、创建应用、开通权限、版本发布**由 `hub.onboard.setup` 代做**,但必须先经选择框显式确认
-- `setup` 每个阶段先做只读幂等检测,已完成就跳过;任一步未命中立即停止后续提交,
-  避免留下半提交状态
+- `setup` 权限阶段先用 **API 只读探针**验证,已可用(`api_verified`)或无法确认(`skipped`)
+  都跳过 UI 开通;发布阶段先做只读幂等检测,已完成就跳过。各阶段**独立执行**,
+  单阶段未命中只停该阶段、不阻断后续阶段,且绝不重试提交表单,避免留下半提交状态
 - 以上接入工具都不读 stdin、不向 stdout 打印向导文本,stdio 宿主(无 TTY)下安全;
   浏览器操作全部有界超时,卡住会在数秒内返回 `selector_miss` 而不是一直"正在执行中"
 - **不要让用户切换到终端执行任何命令**

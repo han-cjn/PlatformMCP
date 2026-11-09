@@ -160,15 +160,15 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **自动引导**：启动时检测到某平台缺凭据，终端直跑（有 TTY）会自动逐个进入交互向导，完成即热重载、全部接入后继续启动。WorkBuddy 等 stdio 宿主（stdin 是管道）跳过交互，只在 stderr 打一条指引日志。可用 `HUB_NO_AUTO_ONBOARD=1` 关闭（CI/测试环境）。
 
-**Agent 驱动的接入**（stdio 宿主推荐）：以下工具串成全自动链路，用户只需在浏览器里扫码、确认应用名与点击按钮，**无需切换到终端执行任何命令**：
+**Agent 驱动的接入**（stdio 宿主推荐）：以下工具串成全自动链路，用户只需在浏览器里登录，并完成两次选择框确认（选平台、确认动作清单），**无需切换到终端执行任何命令**。第一步的选择框会**列出项目支持的全部平台**（不只是缺凭据的），每项带中文名、凭据状态、是否支持自动接入、可用能力与说明：
 
 | 工具 | 作用 |
 |---|---|
-| `hub.onboard.status()` | 返回 `missing` / `configured` 平台清单，供 Agent 弹选择框 |
+| `hub.onboard.status()` | 返回 `platforms` 全量平台清单（含 `id` / `name` / `credentials` / `setup_supported` / `capabilities` / `hint`），以及兼容字段 `supported` / `missing` / `configured`；能力清单从语义层矩阵动态生成 |
 | `hub.onboard.start(platform)` | 起带调试端口的 Chrome 并打开开放平台页面；**带状态感知**，已登录/已在详情页时不再列扫码建应用 |
 | `hub.onboard.watch(platform)` | 轮询 CDP 标签 URL，监听扫码完成 / 进入应用详情页 |
-| `hub.onboard.setup(platform, app_name?, confirmed?)` | **推荐入口**：自动点进/创建应用 → 抓凭据 → 开权限 → 发布版本，一次调用跑完全链路 |
-| `hub.onboard.inspect(platform)` | 只读 dump 当前页面按钮文本与输入框 placeholder，用于校准选择器 |
+| `hub.onboard.setup(platform, app_name?, confirmed?)` | **推荐入口**：自动点进/创建应用 → 抓凭据 → **API 探针验证权限** → 发布版本，各阶段独立执行 |
+| `hub.onboard.inspect(platform)` | 只读 dump 当前页面按钮文本、输入框 placeholder，且候选带命中的标签/role（如 `a,[role=button]`），用于校准选择器 |
 | `hub.onboard.create_app(platform, app_name?, confirmed?)` | 单独代建应用：幂等检查 + 显式确认门 + 自动接 `capture`（当前仅飞书） |
 | `hub.onboard.capture(platform)` | 读 App ID/Secret → 校验 → 写 `.env` → 热重载挂载 |
 
@@ -176,7 +176,11 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 `create_app` 有两道门：**幂等门**（已打开详情页或列表页已有应用时一律不新建，直接复用并走 `capture`）与**确认门**（`confirmed=false` 只返回 `need_confirmation`，不碰任何按钮，让 Agent 用选择框征求同意）。创建表单按可见文本匹配按钮、CSS 多候选定位输入框，不绑定易变的 class；任一步未命中返回 `selector_miss` 并附页面候选元素，**降级人工且不静默重试提交**。提交后必须验证出现新的 `/app/<appId>/...` 详情页才算成功。登录（扫码/验证码）仍需人工；权限开通与版本发布可交由 `setup` 自动完成。
 
-`setup` 是端到端入口：`confirmed=false` 先返回 `plan`（创建应用 / 开权限 / 发布版本会在企业里真实产生记录），用户确认后带 `confirmed=true` 重调，Hub 会**自动打开或创建应用详情页**（从列表页读出应用链接直接打开，不需要用户点击）、抓凭据写 `.env` 并热重载、开通 `im:message` / `im:chat` / `bitable:app`、创建版本 `1.0.0` 并申请发布。每个阶段先跑只读 `probe`（点菜单 + `readPage`）做幂等检测——页面已显示「当前修改均已发布」或三项权限齐全就返回 `already_done` 跳过；任一步 `selector_miss` 立即停止后续提交并回传 `candidates`，避免留下半提交状态。`hub.onboard.inspect` 可只读 dump 当前页面的按钮文本与输入框 placeholder，用来校准声明式 Ops。当前仅 feishu 定义了配置与发布动作，其余平台返回 `unsupported` 降级到 `capture`。
+`setup` 是端到端入口：`confirmed=false` 先返回 `plan`（创建应用 / 开权限 / 发布版本会在企业里真实产生记录），用户确认后带 `confirmed=true` 重调，Hub 会**自动打开或创建应用详情页**（从列表页读出应用链接直接打开，不需要用户点击）、抓凭据写 `.env` 并热重载，再跑权限与发布两个**相互独立**的阶段。
+
+**权限改为 API 优先**（2026-11-09 实测踩坑后调整）：先用只读探针 `GET /open-apis/im/v1/chats?page_size=1` 判断能力是否可用——通了返回 `api_verified` 并**跳过整个 UI 开通流程**，既避开「点不到菜单就报失败」，也避免权限已开通时重复提交；无法确认（`unknown` / `no_credentials`）同样跳过 UI、标 `skipped` 且不做任何变更；只有平台明确返回权限不足（`needs_perms`）才进 UI 开通。`perm_probe` 如实区分 `checked`（仅群列表读权限）与 `unverified`（`im:message` 发消息、`bitable:app` 多维表格），**不把单个 API 调通等同于三个 scope 全部已开通**。
+
+**各阶段独立**：单阶段 `selector_miss` 只记它自己的失败并继续跑下一阶段（旧版遇第一个失败就整体 `return`，导致 `publish` 根本没执行，却被误读成「平台侧原本已完成」）；`phase=partial` 会列出失败阶段，`phase=done` 时若存在 `skipped` 阶段也会在 `next` 里明确提示未验证项。发布阶段仍先跑只读 `probe`（等菜单渲染 + `readPage`）做幂等检测，页面已显示「当前修改均已发布」返回 `already_done` 跳过。UI 点击的选择器与 `inspect` 候选采集**共用同一份标签集合**（含 `button` / `[role=button]` / `[role=tab]`），并先 `waitVisible` 等菜单文本出现再点，匹配放宽为允许数字角标；`candidates` 现在带标签/role，现场即可定位是哪种元素。当前仅 feishu 定义了配置与发布动作，其余平台返回 `unsupported` 降级到 `capture`。
 
 浏览器执行器的所有操作均有界超时（单步 6s、会话 25s）：`waitVisible` 不再用无超时的 `MustElement` 无限重试；`NewBrowserExecutor` 复用已有标签而非无条件新建 `about:blank`，不会再留下空白页签。`capture` 还会跳过标为 `Scope: "list"` 的步骤（如等 `app-card`），因此在详情页调用时不会卡在「正在执行中」。
 

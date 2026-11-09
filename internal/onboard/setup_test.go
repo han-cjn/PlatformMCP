@@ -75,6 +75,77 @@ func TestSetupStageDoneMarkers(t *testing.T) {
 	}
 }
 
+// TestRunSetupStageAPIShortCircuit A:API 探针通过或无法确认时,enable_perms
+// 必须当场返回,不得打开浏览器、不得点任何按钮(否则会在权限已开通时重复提交)。
+func TestRunSetupStageAPIShortCircuit(t *testing.T) {
+	p, ok := FindPortal("feishu")
+	if !ok {
+		t.Fatal("缺少 feishu 清单")
+	}
+	stage := feishuSetupStages()[0]
+	for _, tc := range []struct{ status, want string }{
+		{"api_ready", "api_verified"},
+		{"unknown", "skipped"},
+		{"no_credentials", "skipped"},
+		{"unsupported", "skipped"},
+	} {
+		probe := &PermProbeResult{Status: tc.status, Checked: []string{"im:chat"},
+			Unverified: []string{"im:message"}, Detail: "mock"}
+		step, candidates := runSetupStage(stage, p, probe)
+		if step.Status != tc.want {
+			t.Fatalf("probe=%s 应短路为 %s,实际 %s: %+v", tc.status, tc.want, step.Status, step)
+		}
+		if len(candidates) != 0 {
+			t.Fatalf("短路时不应打开浏览器采集候选: %v", candidates)
+		}
+	}
+}
+
+// TestSetupStageSelectorsConsistent B:probe/click 的选择器必须覆盖 button,
+// 且与 collectCandidates 的采集范围同源;并先等菜单文本渲染再点。
+func TestSetupStageSelectorsConsistent(t *testing.T) {
+	groups := strings.Split(menuCandidateSelector, ", ")
+	hasButton := false
+	for _, g := range groups {
+		if g == "button" {
+			hasButton = true
+		}
+	}
+	if !hasButton {
+		t.Fatalf("选择器集合必须含 button(实测踩坑): %s", menuCandidateSelector)
+	}
+	for _, s := range feishuSetupStages() {
+		probeOps := opsForScope(s.Action, "probe")
+		if len(probeOps) == 0 || probeOps[0].Kind != "waitVisible" || probeOps[0].Match == "" {
+			t.Fatalf("%s 的 probe 第一步应为带 Match 的 waitVisible(等 SPA 渲染): %+v", s.ID, probeOps)
+		}
+		for _, op := range probeOps {
+			if op.Kind == "click" && op.Target != menuCandidateSelector {
+				t.Fatalf("%s 的 probe click 选择器与候选采集不一致: %s", s.ID, op.Target)
+			}
+		}
+	}
+}
+
+// TestSetupStageOutcomesIndependent C:一个阶段失败不能掩盖另一个阶段的成功,
+// 也不能把「跳过」与「失败」混为一谈。
+func TestSetupStageOutcomesIndependent(t *testing.T) {
+	steps := []SetupStep{
+		{ID: "open_app", Status: "already_open"},
+		{ID: "capture", Status: "done"},
+		{ID: "enable_perms", Status: "selector_miss"},
+		{ID: "publish", Status: "already_done"},
+		{ID: "extra", Status: "skipped"},
+	}
+	failed, skipped := setupStageOutcomes(steps)
+	if strings.Join(failed, ",") != "enable_perms" {
+		t.Fatalf("只有失败阶段应进 failed: %v", failed)
+	}
+	if strings.Join(skipped, ",") != "extra" {
+		t.Fatalf("skipped 不应被当成失败: %v", skipped)
+	}
+}
+
 // TestAbsoluteAppURL 列表页 href 常为相对路径,补成绝对 URL 才能直接打开详情页。
 func TestAbsoluteAppURL(t *testing.T) {
 	p, ok := FindPortal("feishu")

@@ -270,19 +270,48 @@ func listExistingApps(p *Portal) ([]AppRef, error) {
 
 // collectCandidates 失败时 dump 页面上可见的按钮文本与输入框 placeholder,
 // 供 Agent 转述、也便于日后校准选择器。只读,不改 DOM。
+// candidatePerGroup 限制每组读取的元素数:div/span 这类泛标签可达上千个,
+// 逐个 MustText 都是一次 CDP 往返,不限流会拖到会话超时。
+const candidatePerGroup = 20
+
+// collectCandidates 按选择器分组采集,输出形如 "a,[role=button]: 权限管理",
+// 直接告诉调用方该文本命中了哪些标签/语义角色,便于现场校准 probe 的 Match。
+// 分组从 menuCandidateSelector 派生,保证与 probe/click 的集合永不漂移。
 func collectCandidates(bx *BrowserExecutor) []string {
 	var out []string
 	_ = bx.safe(func() {
-		if els, e := bx.page.Elements("button, a, [role=button]"); e == nil {
+		hits := map[string][]string{}
+		order := []string{}
+		for _, sel := range strings.Split(menuCandidateSelector, ", ") {
+			els, e := bx.page.Elements(sel)
+			if e != nil {
+				continue
+			}
+			limit := candidatePerGroup
+			if sel == "div" || sel == "span" {
+				limit = 5
+			}
 			for i, el := range els {
-				if i >= 20 {
+				if i >= limit {
 					break
 				}
 				t := strings.TrimSpace(el.MustText())
-				if t != "" && len(t) <= 40 {
-					out = append(out, "button: "+t)
+				if t == "" || len(t) > 40 {
+					continue
+				}
+				if _, ok := hits[t]; !ok {
+					order = append(order, t)
+				}
+				if !containsStrLocal(hits[t], sel) {
+					hits[t] = append(hits[t], sel)
 				}
 			}
+		}
+		for i, t := range order {
+			if i >= 30 {
+				break
+			}
+			out = append(out, strings.Join(hits[t], ",")+": "+t)
 		}
 		if ins, e := bx.page.Elements("input, textarea"); e == nil {
 			for i, el := range ins {
@@ -296,6 +325,15 @@ func collectCandidates(bx *BrowserExecutor) []string {
 		}
 	})
 	return out
+}
+
+func containsStrLocal(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // pageSet 记录调用前的标签 URL 集合,用于识别「创建后新出现的详情页」。
