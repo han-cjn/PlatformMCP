@@ -178,25 +178,42 @@ func collectCreds(p *Portal, env map[string]string) error {
 // readHidden 含 SECRET/TOKEN 的键关闭回显(/dev/tty 直读,不进 shell history)。
 func readHidden(envKey string) string {
 	upper := strings.ToUpper(envKey)
-	if strings.Contains(upper, "SECRET") || strings.Contains(upper, "TOKEN") {
-		f, err := os.Open("/dev/tty")
-		if err == nil {
-			defer f.Close()
-			if b, err := term.ReadPassword(int(f.Fd())); err == nil {
-				fmt.Println()
-				return strings.TrimSpace(string(b))
-			}
+	if (strings.Contains(upper, "SECRET") || strings.Contains(upper, "TOKEN")) && tty != nil {
+		if b, err := term.ReadPassword(int(tty.Fd())); err == nil {
+			fmt.Println()
+			return strings.TrimSpace(string(b))
 		}
-		// /dev/tty 不可用(如 CI 管道)时退回普通读
+		// tty 读失败(极端情况)时退回普通读
 	}
 	return strings.TrimSpace(prompt(""))
 }
 
 var stdin *bufio.Scanner
 
-// prompt 打印提示并读取一行(空输入返回空串)。
+// tty 缓存 /dev/tty 句柄(若可用)。Agent 以 PTY/管道方式拉起向导时,
+// os.Stdin 是管道无法交互,而 /dev/tty 仍指向用户终端,人工确认(回车)从这里读。
+var tty *os.File
+
+func init() {
+	// 打开失败(无控制终端,如 CI)时保持 nil,退回 os.Stdin
+	if f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+		tty = f
+	}
+}
+
+// prompt 打印提示并读取一行(空输入返回空串)。优先读 /dev/tty,保证 Agent 拉起的
+// 向导里用户的回车确认总能送达;无 TTY 时退回 os.Stdin(兼容脚本/测试管道输入)。
 func prompt(msg string) string {
 	fmt.Print(msg)
+	if tty != nil {
+		if ttyScanner == nil {
+			ttyScanner = bufio.NewScanner(tty)
+		}
+		if ttyScanner.Scan() {
+			return ttyScanner.Text()
+		}
+		return ""
+	}
 	if stdin == nil {
 		stdin = bufio.NewScanner(os.Stdin)
 	}
@@ -205,3 +222,5 @@ func prompt(msg string) string {
 	}
 	return ""
 }
+
+var ttyScanner *bufio.Scanner

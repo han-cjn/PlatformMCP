@@ -49,6 +49,31 @@ func TestUpsertEnv(t *testing.T) {
 	}
 }
 
+// TestPromptFallsBackToStdinWithoutTTY 无控制终端(CI/管道)时,prompt 应从 os.Stdin 读,
+// 保持脚本/测试可注入输入;有 TTY 时交互路径走 /dev/tty,不影响此用例。
+func TestPromptFallsBackToStdinWithoutTTY(t *testing.T) {
+	if tty != nil {
+		t.Skip("当前进程有控制终端,prompt 走 /dev/tty,跳过 stdin 回退用例")
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	stdin = nil // 重置缓存的 scanner,让它基于新 stdin 重建
+	if _, err := w.WriteString("hello-from-pipe\n"); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	got := prompt("input: ")
+	if got != "hello-from-pipe" {
+		t.Fatalf("期望从 stdin 读到注入内容,实际 %q", got)
+	}
+}
+
 func TestPortalDataComplete(t *testing.T) {
 	want := []string{"feishu", "dingtalk", "wecom", "tencent-docs"}
 	for _, name := range want {
