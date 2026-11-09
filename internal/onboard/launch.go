@@ -1,6 +1,7 @@
 package onboard
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -41,6 +42,7 @@ var cdpHTTPClient = &http.Client{
 // 刻意不含任何凭据值,也不含需要等待人工输入的字段。
 type StartResult struct {
 	Platform    string   `json:"platform"`
+	Phase       string   `json:"phase"` // ready_to_capture / logged_in / waiting_login / browser_started
 	Title       string   `json:"title"`
 	URL         string   `json:"url"`
 	Chrome      string   `json:"chrome"` // already-running / started / unavailable
@@ -61,13 +63,38 @@ func StartPlatform(platform string) (*StartResult, error) {
 
 	res := &StartResult{
 		Platform:    platform,
+		Phase:       "browser_started",
 		Title:       p.Title,
 		URL:         p.URL,
 		ChromePort:  chromeDebugPort,
 		ManualSteps: manualSteps(p),
-		Next: "请在打开的浏览器里完成登录/创建应用/开权限/发布,并点进应用「凭证与基础信息」页;" +
+		Next: "请在打开的浏览器里完成登录,并点进应用「凭证与基础信息」页;" +
 			"随后轮询 hub.onboard.watch,出现 in_app_detail=true 时调用 hub.onboard.capture " +
 			"自动抓取凭据→写 .env→真连校验→热重载(无需在终端执行任何命令)",
+	}
+
+	// 状态感知:用户可能早就登录了、甚至已经停在应用凭证页(调试 profile 长期
+	// 保留登录态)。此时再列「扫码登录/建应用/开权限/发布」是纯粹的误导,
+	// Agent 会把这些当成待办转述,流程就永远卡在第一步。
+	if w, err := Watch(platform); err == nil && w.ChromeReady {
+		switch {
+		case w.InAppDetail:
+			res.Phase = "ready_to_capture"
+			res.Chrome = "already-running"
+			res.PageOpened = true // 目标页面已打开,不再新开标签干扰用户
+			res.ManualSteps = []string{}
+			res.Next = "检测到你已登录且已停在应用「凭证与基础信息」页,无需扫码、无需创建应用;" +
+				"请立即调用 hub.onboard.capture 完成凭据抓取→写 .env→热重载。不要再提示用户登录或建应用"
+			return res, nil
+		case w.LoginState == "logged_in":
+			res.Phase = "logged_in"
+			res.ManualSteps = []string{
+				"在浏览器里打开已有应用的「凭证与基础信息」页;若应用列表为空,可调用 hub.onboard.create_app 由 Agent 代建(需用户确认)",
+			}
+			res.Next = "已登录,无需扫码;轮询 hub.onboard.watch,出现 in_app_detail=true 时立即调用 hub.onboard.capture"
+		case w.LoginState == "waiting_login":
+			res.Phase = "waiting_login"
+		}
 	}
 
 	if debugChromeAlive() {
@@ -211,6 +238,23 @@ func startDebugChrome(bin, profile string) error {
 // 相比 rod 连接,这个 HTTP 端点不阻塞、不需要等页面加载完成、不会误关用户 Chrome。
 // 新版 Chrome 要求 PUT(GET 已被禁用)。
 func openDebugTab(rawURL string) bool {
+	// 幂等:已有同 URL 标签就不再新开。Agent 每次重试 start 都开一个新标签,
+	// 会让 /json/list 堆满重复页,watch 的阶段判定也更容易被干扰。
+	if resp, err := cdpHTTPClient.Get(chromeDebugURL + "/json/list"); err == nil {
+		var items []struct {
+			Type string `json:"type"`
+			URL  string `json:"url"`
+		}
+		ok := json.NewDecoder(resp.Body).Decode(&items) == nil
+		resp.Body.Close()
+		if ok {
+			for _, it := range items {
+				if it.Type == "page" && it.URL == rawURL {
+					return true
+				}
+			}
+		}
+	}
 	req, err := http.NewRequest(http.MethodPut,
 		chromeDebugURL+"/json/new?"+url.QueryEscape(rawURL), nil)
 	if err != nil {

@@ -202,6 +202,31 @@ func main() {
 		return mcp.NewToolResultText(string(out)), nil
 	})
 
+	// 接入提速:登录完成后由 Agent 代建应用,再自动接 capture 收尾。
+	// 有幂等门(已有应用/已在详情页就不建)与确认门(confirmed=false 只返回
+	// need_confirmation),未命中选择器时降级人工且不重试提交。
+	hub.AddTool(mcp.NewTool("hub.onboard.create_app",
+		mcp.WithDescription("代用户创建平台应用并自动完成接入:先幂等检查(已有应用或已停在应用详情页就不新建,直接走 capture),未确认时只返回 need_confirmation 让你用选择框征求同意;确认后自动填写应用名并提交创建表单、验证跳转,最后自动抓取凭据→写 .env→热重载。登录(扫码/验证码)、权限开通与版本发布仍需人工。返回 phase 按 need_confirmation / existing_apps / selector_miss / done 分别处理,不要重复提交创建表单"),
+		mcp.WithString("platform", mcp.Required(), mcp.Description("要接入的平台: feishu / dingtalk / wecom / tencent-docs(当前仅 feishu 定义了创建动作)")),
+		mcp.WithString("app_name", mcp.Description("应用名称,默认 mcp-hub;需用户确认后再传")),
+		mcp.WithBoolean("confirmed", mcp.Description("用户是否已通过选择框明确同意创建应用。为 true 才会真正提交表单,false 时仅返回 need_confirmation")),
+	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		platform := req.GetString("platform", "")
+		res, err := onboard.CreateApp(platform, req.GetString("app_name", ""), req.GetBool("confirmed", false),
+			func(map[string]string) error {
+				if err := reloadPlatform(ctx, platform, *configPath, mgr); err != nil {
+					return err
+				}
+				hr.SetCredentials(platform, true)
+				return nil
+			})
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := json.MarshalIndent(res, "", "  ")
+		return mcp.NewToolResultText(string(out)), nil
+	})
+
 	// P0-3:会话枚举——飞书实时拉取群列表,企微/钉钉来自消息帧沉淀的缓存
 	hub.AddTool(mcp.NewTool("hub.chats",
 		mcp.WithDescription("枚举可用会话:飞书走 im_v1_chat_list;企微/钉钉来自已接收消息帧缓存"),

@@ -178,7 +178,10 @@ func (bx *BrowserExecutor) runOp(op Op, creds map[string]string) error {
 			text = creds[v]
 		}
 		return bx.safe(func() {
-			el := bx.page.MustElement(op.Target)
+			el, err := bx.pick(op)
+			if err != nil {
+				panic(err)
+			}
 			el.MustSelectAllText().MustInput(text) // 全选旧值后输入,实现覆盖式填表
 		})
 	case "readText":
@@ -256,12 +259,24 @@ func (bx *BrowserExecutor) safe(f func()) (err error) {
 }
 
 // pick 按选择器取第 Index 个匹配元素(多匹配时跳过前面 N 个)。
+// op.Match 非空时改用「按可见文本匹配」:飞书开放平台等 React SPA 的 class 随
+// 改版变化,按钮文本比 class 稳定得多;此时 Target 仍可写逗号分隔的多候选。
 func (bx *BrowserExecutor) pick(op Op) (*rod.Element, error) {
 	if op.Index < 0 {
 		return nil, fmt.Errorf("Index 不能为负数(%d)", op.Index)
 	}
 	if bx.page == nil {
 		return nil, errors.New("浏览器页面未初始化")
+	}
+	if op.Match != "" {
+		if op.Index != 0 {
+			return nil, fmt.Errorf("Match 与 Index 不能同时使用(Index=%d)", op.Index)
+		}
+		el, err := bx.page.Timeout(browserClickTimeout).ElementR(op.Target, op.Match)
+		if err != nil {
+			return nil, fmt.Errorf("按文本 /%s/ 在 %q 中未匹配到元素: %w", op.Match, op.Target, err)
+		}
+		return el, nil
 	}
 	els, err := bx.page.Elements(op.Target)
 	if err != nil {

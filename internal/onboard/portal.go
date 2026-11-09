@@ -43,12 +43,13 @@ type BrowserAction struct {
 // Secret 的「显示」按钮是同 class 的第 2 个(第 1 个是复制)。
 type Op struct {
 	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / fill / screenshot
-	Target      string   // CSS 选择器或 URL 前缀(navigate/waitURL)
+	Target      string   // CSS 选择器(支持逗号分隔的多候选)或 URL 前缀(navigate/waitURL)
 	Text        string   // fill 的输入内容;支持 "$env:KEY" 引用已收集凭据
 	ExtractKey  string   // readText 抽取到的值存入该 envKey
 	Index       int      // 多匹配时取第几个;0 取首个
 	MaskRune    rune     // readText 识别的掩码字符(0 表示用 defaultMaskRune)
 	URLExcludes []string // waitURL 命中需排除的 URL 片段(过滤分页/搜索等假命中)
+	Match       string   // JS 正则:按元素可见文本匹配(click/hover/fill),不依赖易变的 class
 }
 
 // defaultMaskRune 飞书/钉钉类平台凭据掩码的默认字符(U+2217 ASTERISK OPERATOR)。
@@ -99,12 +100,25 @@ var Portals = map[string]*Portal{
 			}, URLs: []string{"https://open.feishu.cn/app"}},
 			{ID: "create-app", Brief: "创建企业自建应用:填名称/描述/图标", Detail: []string{
 				"点击「创建企业自建应用」,填写应用名称(如 mcp-hub)、描述、上传图标",
+				"Agent 可通过 hub.onboard.create_app 代填并提交(需显式确认),图标沿用平台默认",
 			}, URLs: []string{"https://open.feishu.cn/app"}, Browser: &BrowserAction{
-				Script: "feishu@2026-11",
+				Script: "feishu@2026-11-create",
+				// 选择器策略:按钮按可见文本匹配,输入框用 CSS 多候选(placeholder/role/class)。
+				// 飞书开放平台是 React SPA,class 随改版变化;纯 data-test 钩子不可靠,
+				// 因此不绑定单一选择器。任一步未命中即降级人工,绝不静默重试提交。
 				Ops: []Op{
 					{Kind: "navigate", Target: "https://open.feishu.cn/app"},
-					{Kind: "waitVisible", Target: ".data-test__create-app-button"}, // 2026-11 校准:创建按钮有稳定测试钩子
-					{Kind: "screenshot", Target: "feishu-01-create.png"},           // 表单填写留人工(平台有创建风控)
+					{Kind: "waitVisible", Target: ".data-test__create-app-button, button, a, [role=button]"},
+					{Kind: "click", Target: ".data-test__create-app-button, button, a, [role=button]",
+						Match: "创建企业自建应用|创建应用"},
+					{Kind: "waitVisible", Target: "input[placeholder*='名称'], [role=dialog] input, [class*=modal] input, [class*=dialog] input"},
+					{Kind: "fill", Target: "input[placeholder*='名称'], [role=dialog] input[type=text], [class*=modal] input[type=text], [class*=dialog] input[type=text]",
+						Text: "$app_name"},
+					// 提交按钮必须整串匹配,避免误命中列表页的「创建企业自建应用」入口
+					{Kind: "click", Target: "[role=dialog] button, [class*=modal] button, [class*=dialog] button, button",
+						Match: "^\\s*(确定|确认|提交|立即创建|创建应用|创建)\\s*$"},
+					{Kind: "waitURL", Target: "https://open.feishu.cn/app/",
+						URLExcludes: []string{"/app/list", "/app/create", "/app/search"}},
 				},
 			}},
 			{ID: "enable-perms", Brief: "开权限(与 Hub 功能一一对应)", Detail: []string{

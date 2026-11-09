@@ -160,13 +160,19 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **自动引导**：启动时检测到某平台缺凭据，终端直跑（有 TTY）会自动逐个进入交互向导，完成即热重载、全部接入后继续启动。WorkBuddy 等 stdio 宿主（stdin 是管道）跳过交互，只在 stderr 打一条指引日志。可用 `HUB_NO_AUTO_ONBOARD=1` 关闭（CI/测试环境）。
 
-**Agent 驱动的接入**（stdio 宿主推荐）：三个工具串成全自动链路，用户只需在浏览器里扫码与点按钮，**无需切换到终端执行任何命令**：
+**Agent 驱动的接入**（stdio 宿主推荐）：五个工具串成全自动链路，用户只需在浏览器里扫码、确认应用名与点击按钮，**无需切换到终端执行任何命令**：
 
 | 工具 | 作用 |
 |---|---|
-| `hub.onboard.start(platform)` | 起带调试端口的 Chrome 并打开开放平台页面 |
+| `hub.onboard.status()` | 返回 `missing` / `configured` 平台清单，供 Agent 弹选择框 |
+| `hub.onboard.start(platform)` | 起带调试端口的 Chrome 并打开开放平台页面；**带状态感知**，已登录/已在详情页时不再列扫码建应用 |
 | `hub.onboard.watch(platform)` | 轮询 CDP 标签 URL，监听扫码完成 / 进入应用详情页 |
+| `hub.onboard.create_app(platform, app_name?, confirmed?)` | 代建应用：幂等检查 + 显式确认门 + 自动接 `capture`（当前仅飞书） |
 | `hub.onboard.capture(platform)` | 读 App ID/Secret → 校验 → 写 `.env` → 热重载挂载 |
+
+`start` 会先跑一次 `watch`：若已停在应用详情页，返回 `phase=ready_to_capture`、`manual_steps=[]`，并跳过开新标签，直接引导 Agent 调 `capture`——避免「人已经登录了还让我扫码建应用」。仅 `waiting_login` 时才列出登录步骤。
+
+`create_app` 有两道门：**幂等门**（已打开详情页或列表页已有应用时一律不新建，直接复用并走 `capture`）与**确认门**（`confirmed=false` 只返回 `need_confirmation`，不碰任何按钮，让 Agent 用选择框征求同意）。创建表单按可见文本匹配按钮、CSS 多候选定位输入框，不绑定易变的 class；任一步未命中返回 `selector_miss` 并附页面候选元素，**降级人工且不静默重试提交**。提交后必须验证出现新的 `/app/<appId>/...` 详情页才算成功。登录（扫码/验证码）、权限开通与版本发布仍需人工。
 
 `watch` 靠 URL 信号判定阶段（登录页 `accounts.feishu.cn/.../login` → `open.feishu.cn/app` → 详情页 `/app/<appId>/...`），无需读 cookie 或碰登录动作。`capture` 不复用交互式向导 `Run()`（它全程 `fmt.Printf` 到 stdout 且有 5 处阻塞读终端），而是只执行凭据读取类浏览器动作，零 TTY、零 stdout 输出。Chrome 子进程的 stdio 全部丢弃、`Setsid` 脱离会话，Hub 退出不影响浏览器；CDP 请求显式禁用代理，避免宿主 `HTTP_PROXY` 把 `127.0.0.1` 转发成 502。
 
