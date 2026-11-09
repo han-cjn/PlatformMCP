@@ -55,7 +55,8 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 		return res, nil
 	case !w.InAppDetail:
 		res.Phase = "waiting_app_detail"
-		res.Next = "请提示用户在浏览器里创建应用并进入「凭证与基础信息」页(URL 形如 " + p.URL + "/<appId>/...);完成后重新调用 hub.onboard.capture"
+		res.Next = "调用 hub.onboard.setup 可自动打开/创建应用详情页并完成后续配置;" +
+			"若只需抓凭据,请让用户在浏览器里打开「凭证与基础信息」页(URL 形如 " + p.URL + "/<appId>/...)后重试 hub.onboard.capture"
 		return res, nil
 	}
 
@@ -157,7 +158,7 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 		}
 	}
 	res.Phase = "done"
-	res.Next = "凭据已写入 .env 并完成热重载;请确认已在开放平台开通所需权限并发布应用,之后即可调用 table.query 等能力"
+	res.Next = "凭据已写入 .env 并完成热重载;调用 hub.onboard.setup 可自动完成权限开通与版本发布,之后即可调用 table.query 等能力"
 	return res, nil
 }
 
@@ -169,6 +170,11 @@ func captureOps(act *BrowserAction) []Op {
 	for _, op := range act.Ops {
 		switch op.Kind {
 		case "navigate", "waitURL", "screenshot":
+			continue
+		}
+		// 列表页专用步骤(如等 app-card、等用户点开应用)在详情页必然等不到,
+		// 旧版把它们留在这里,配合无超时的 MustElement 会让 capture 永久卡死。
+		if op.Scope == "list" {
 			continue
 		}
 		ops = append(ops, op)

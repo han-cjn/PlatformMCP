@@ -42,7 +42,7 @@ type BrowserAction struct {
 // 存入凭据收集结果(envKey)。Index 表示多匹配元素取第几个(0 起):飞书
 // Secret 的「显示」按钮是同 class 的第 2 个(第 1 个是复制)。
 type Op struct {
-	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / fill / screenshot
+	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / readPage / fill / screenshot
 	Target      string   // CSS 选择器(支持逗号分隔的多候选)或 URL 前缀(navigate/waitURL)
 	Text        string   // fill 的输入内容;支持 "$env:KEY" 引用已收集凭据
 	ExtractKey  string   // readText 抽取到的值存入该 envKey
@@ -50,6 +50,7 @@ type Op struct {
 	MaskRune    rune     // readText 识别的掩码字符(0 表示用 defaultMaskRune)
 	URLExcludes []string // waitURL 命中需排除的 URL 片段(过滤分页/搜索等假命中)
 	Match       string   // JS 正则:按元素可见文本匹配(click/hover/fill),不依赖易变的 class
+	Scope       string   // 适用阶段:"list" 仅应用列表页;"probe" 只读探测;"apply" 有副作用;空/detail 表示详情页可用
 }
 
 // defaultMaskRune 飞书/钉钉类平台凭据掩码的默认字符(U+2217 ASTERISK OPERATOR)。
@@ -140,10 +141,12 @@ var Portals = map[string]*Portal{
 				Browser: &BrowserAction{
 					Script: "feishu@2026-11",
 					Ops: []Op{
-						{Kind: "navigate", Target: "https://open.feishu.cn/app"},
-						{Kind: "waitVisible", Target: "[class*='app-card']"},
-						{Kind: "screenshot", Target: "feishu-02-list.png"},
-						{Kind: "waitURL", Target: "https://open.feishu.cn/app/",
+						// 下面四步只在「应用列表页等用户点进应用」的向导流程里执行;
+						// capture 在详情页调用时必须跳过,否则 waitVisible(app-card) 永远等不到。
+						{Kind: "navigate", Target: "https://open.feishu.cn/app", Scope: "list"},
+						{Kind: "waitVisible", Target: "[class*='app-card']", Scope: "list"},
+						{Kind: "screenshot", Target: "feishu-02-list.png", Scope: "list"},
+						{Kind: "waitURL", Target: "https://open.feishu.cn/app/", Scope: "list",
 							// 只认 /app/<appId>/... 详情标签:排除列表页/创建页/分页参数等假命中
 							URLExcludes: []string{"/app/list", "/app/create", "/app/search"}},
 						{Kind: "waitVisible", Target: ".auth-info__appid .secret-code__code"},

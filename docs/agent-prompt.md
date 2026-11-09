@@ -210,37 +210,44 @@
 3. **用户选中后立即调用 `hub.onboard.start`**(参数 `platform` = 选中项)。
    自动起调试 Chrome 并打开开放平台页面,**浏览器会真的弹出来**。
    **不要只把命令打印给用户,也不要让用户去终端跑脚本。**
-   - 返回 `phase=ready_to_capture` → 说明用户已登录且已停在应用凭证页,
-     **跳过下面所有步骤,直接调 `hub.onboard.capture`**。不要再提示扫码或建应用。
+   - 返回 `phase=ready_to_capture` → 用户已登录且已停在应用凭证页,
+     **跳过扫码与人工步骤,直接进入第 4 步调 `setup`**。不要再提示扫码或建应用。
    - 返回 `phase=logged_in` → 用户已登录,**不要再让他扫码**。
    - 只有 `phase=waiting_login` 才需要转述登录步骤。
-4. **轮询 `hub.onboard.watch` 监听进度**,不必等用户说"我扫完了":
+4. **轮询 `hub.onboard.watch` 监听登录进度**,不必等用户说"我扫完了":
    - `waiting_login` → 等几秒继续轮询,期间不要催促
    - `browser_missing` → 先重试 `watch` 2~3 次(Chrome 刚开标签时调试端点有短暂窗口期),仍失败才重新调用 `hub.onboard.start`,不要一次失败就重开窗口
-   - `logged_in` 且 `in_app_detail=false` → 已有应用就直接请用户点进「凭证与基础信息」页;
-     若列表为空或用户明确要新建应用,调 `hub.onboard.create_app` 代建(见第 5 步)
-5. `hub.onboard.create_app` 的 phase 处理(`confirmed` 是布尔值):
-   - 首次调用**不带 `confirmed`** 或传 `false` → 返回 `need_confirmation`,
-     用选择框让用户确认应用名(默认 `mcp-hub`),确认后带 `confirmed=true` 再调一次
-   - `existing_apps` / `already_in_detail` → 已有应用,工具不会新建;按 `next` 走 `capture`
-   - `done` → 应用已建且凭据已写入,调 `hub.health` 确认
-   - `selector_miss` / `create_failed` → 把 `candidates` 与 `next` 转述给用户,
-     让他在浏览器里手动创建,**绝不自动重试提交创建表单**
-6. `watch` 返回 `in_app_detail=true` 时,**立即调用 `hub.onboard.capture`**。
-   它会自动读取 App ID / Secret → 格式校验 → 真连校验 → 写 `.env` → 热重载挂载,
-   全程零终端交互,**替代原先那条 `go run ... -onboard <平台> -onboard-browser` 命令**。
-7. 按 `capture` 的 `phase` 处理:
-   - `done` → 调 `hub.health` 确认 `credentials=true / mounted=true`,回报完成
-   - `waiting_login` / `waiting_app_detail` → 按 `next` 提示,继续轮询后重试
+   - `logged_in` → 立刻进第 5 步,**不要让用户自己点进应用**
+5. **登录后调用 `hub.onboard.setup(platform, confirmed=false)`** 拿动作清单:
+   - 返回 `phase=need_confirmation` 与 `plan` → 用选择框把 `plan` 逐条展示给用户确认
+     (创建应用 / 开通权限 / 发布版本会在企业里真实产生记录,不可撤销)
+   - 用户确认后带 `confirmed=true` 再调一次。`setup` 会自动**打开或创建应用详情页**
+     (无需用户点击)、读取 App ID/Secret → 校验 → 写 `.env` → 热重载,并继续
+     **开通权限 + 创建版本并申请发布**。用户全程只需登录与这一次确认。
+   - `phase=done` → 调 `hub.health` 确认 `credentials=true / mounted=true`,回报完成
+   - `steps` 里出现 `already_done` → 平台侧原本已完成(如已显示「当前修改均已发布」),
+     工具已跳过,**不要重复操作或让用户再点一次**
+   - `phase=partial` 且某步 `selector_miss` → 调用 `hub.onboard.inspect` 拿页面候选按钮/输入框,
+     把 `candidates` 与 `next` 转述给用户校准,**绝不自动重试提交表单**
+   - `phase=unsupported`(非飞书) → 退回第 6 步只做 `capture`
+   - `browser_missing` / `waiting_login` → 按 `next` 提示重试
+6. `hub.onboard.capture` 作为降级或单独抓凭据使用:读 App ID / Secret → 格式校验 →
+   真连校验 → 写 `.env` → 热重载,全程零终端交互。按 `phase` 处理:
+   - `done` → 调 `hub.health` 确认
+   - `waiting_login` / `waiting_app_detail` / `page_loading` → 按 `next` 提示继续轮询后重试
    - 其他 phase → 转述 `message` 与 `next`,不要当成崩溃
+7. 只想单独建应用时才用 `hub.onboard.create_app`(`confirmed=false` 先返回 `need_confirmation`);
+   `existing_apps` / `already_in_detail` / `selector_miss` 按 `next` 处理,**绝不重复提交创建表单**
 8. `missing` 为空 → 直接告知"四个平台凭据均已配置,无需接入"
 
 **边界说明**:
 
-- 登录(扫码/验证码)、权限开通、版本发布与管理员审批**必须人工在浏览器里点**
-- 创建应用**可以由 `hub.onboard.create_app` 代做**,但必须先经选择框显式确认;
-  已有应用时工具会拒绝重复创建(当前仅飞书定义了创建动作)
-- 以上接入工具都不读 stdin、不向 stdout 打印向导文本,stdio 宿主(无 TTY)下安全
+- 登录(扫码/验证码)与管理员审批**必须人工在浏览器里点**;
+  点应用、创建应用、开通权限、版本发布**由 `hub.onboard.setup` 代做**,但必须先经选择框显式确认
+- `setup` 每个阶段先做只读幂等检测,已完成就跳过;任一步未命中立即停止后续提交,
+  避免留下半提交状态
+- 以上接入工具都不读 stdin、不向 stdout 打印向导文本,stdio 宿主(无 TTY)下安全;
+  浏览器操作全部有界超时,卡住会在数秒内返回 `selector_miss` 而不是一直"正在执行中"
 - **不要让用户切换到终端执行任何命令**
 - 首次登录后调试 profile 会长期保留登录态,后续重跑可省去扫码
 

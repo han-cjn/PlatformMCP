@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUpsertEnv(t *testing.T) {
@@ -344,5 +345,59 @@ func TestResolveWebSocketURLPassesThroughWS(t *testing.T) {
 	got, err := resolveWebSocketURL(ws)
 	if err != nil || got != ws {
 		t.Fatalf("ws 地址应原样透传: got %q err %v", got, err)
+	}
+}
+
+// TestCaptureOpsSkipsListStage 回归「capture 卡在正在执行中」:
+// collect-creds 的列表页步骤(等 app-card / 等用户点开应用)在详情页永远等不到,
+// 旧版把它们留在 captureOps 里,配合无超时的 rod MustElement 会永久阻塞 MCP 调用,
+// 并让 NewBrowserExecutor 开的 about:blank 因 defer Close 不执行而永久残留。
+func TestCaptureOpsSkipsListStage(t *testing.T) {
+	p, ok := FindPortal("feishu")
+	if !ok {
+		t.Fatal("缺少 feishu 接入清单")
+	}
+	act := credAction(p)
+	if act == nil {
+		t.Fatal("缺少 collect-creds 浏览器动作")
+	}
+	ops := captureOps(act)
+	for _, op := range ops {
+		if op.Scope == "list" {
+			t.Fatalf("列表页专用步骤被误留在 capture: %+v", op)
+		}
+		switch op.Kind {
+		case "navigate", "waitURL", "screenshot":
+			t.Fatalf("会导走页面/白等/落盘的步骤被误留在 capture: %+v", op)
+		}
+		if strings.Contains(op.Target, "app-card") {
+			t.Fatalf("列表页选择器被误留在 capture: %+v", op)
+		}
+	}
+	keys := map[string]bool{}
+	for _, op := range ops {
+		if op.Kind == "readText" {
+			keys[op.ExtractKey] = true
+		}
+	}
+	for _, k := range []string{"FEISHU_APP_ID", "FEISHU_APP_SECRET"} {
+		if !keys[k] {
+			t.Fatalf("凭据读取步骤缺失: %s(captureOps=%+v)", k, ops)
+		}
+	}
+}
+
+// TestBrowserTimeoutBounds 保证所有单步超时都小于会话总时限,否则 session ctx
+// 会先被取消,错误将变成难以诊断的 context deadline exceeded 而非明确的选择器错误。
+func TestBrowserTimeoutBounds(t *testing.T) {
+	for name, d := range map[string]time.Duration{
+		"browserOpTimeout":     browserOpTimeout,
+		"browserClickTimeout":  browserClickTimeout,
+		"browserWaitURLMax":    browserWaitURLMax,
+		"browserNavigateLimit": browserNavigateLimit,
+	} {
+		if d <= 0 || d >= browserSessionMax {
+			t.Fatalf("%s=%v 必须为正且小于 browserSessionMax=%v", name, d, browserSessionMax)
+		}
 	}
 }

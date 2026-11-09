@@ -53,9 +53,10 @@ func Watch(platform string) (*WatchResult, error) {
 	case res.LoginState == "waiting_login":
 		res.Next = "用户尚未完成扫码登录;继续轮询 hub.onboard.watch,检测到 logged_in 后自动往下走,不要催用户去终端执行命令"
 	case res.LoginState == "logged_in" && res.InAppDetail:
-		res.Next = "已登录且已进入应用详情页,可调用 hub.onboard.capture 自动抓取凭据、校验并热重载"
+		res.Next = "已登录且已进入应用详情页;立即调用 hub.onboard.setup 完成全链路(抓凭据→写 .env→热重载→开权限→发布);只需抓凭据时才用 hub.onboard.capture"
 	case res.LoginState == "logged_in":
-		res.Next = "已登录;请提示用户在浏览器里创建/打开应用并进入「凭证与基础信息」页,之后调用 hub.onboard.capture。若下一次轮询变回 waiting_login,是登录页重定向刚完成,属正常,按新状态继续等待扫码"
+		res.Next = "已登录;立即调用 hub.onboard.setup 自动打开/创建应用并完成后续配置,不要让用户自己点进应用。" +
+			"若下一次轮询变回 waiting_login,是登录页重定向刚完成,属正常,按新状态继续等待扫码"
 	default:
 		res.Next = "页面加载中或停在无关页面,尚未识别到登录页/开放平台页;继续轮询 hub.onboard.watch,状态明确后再继续"
 	}

@@ -46,7 +46,7 @@ func main() {
 	sseAddr := flag.String("sse", "", "以常驻 HTTP 服务暴露 MCP(如 -sse 127.0.0.1:9781):/sse 兼容 SSE 客户端,/mcp 走 StreamableHTTP;为空则 stdio 模式")
 	flag.Parse()
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil))) // 日志走 stderr,stdout 留给 MCP 协议
-	log.SetOutput(os.Stderr) // 依赖库(如钉钉 Stream SDK)用标准 log 打印,重定向到 stderr 防污染 stdout 协议通道
+	log.SetOutput(os.Stderr)                                       // 依赖库(如钉钉 Stream SDK)用标准 log 打印,重定向到 stderr 防污染 stdout 协议通道
 
 	// 嵌入宿主(如 WorkBuddy)以 stdio 拉起时,cwd 不可控:统一锚定到配置文件所在目录,
 	// 使 .env / db_path / adapters/wecom-aibot-mcp/server.js 等相对路径与启动 cwd 解耦。
@@ -206,7 +206,7 @@ func main() {
 	// 有幂等门(已有应用/已在详情页就不建)与确认门(confirmed=false 只返回
 	// need_confirmation),未命中选择器时降级人工且不重试提交。
 	hub.AddTool(mcp.NewTool("hub.onboard.create_app",
-		mcp.WithDescription("代用户创建平台应用并自动完成接入:先幂等检查(已有应用或已停在应用详情页就不新建,直接走 capture),未确认时只返回 need_confirmation 让你用选择框征求同意;确认后自动填写应用名并提交创建表单、验证跳转,最后自动抓取凭据→写 .env→热重载。登录(扫码/验证码)、权限开通与版本发布仍需人工。返回 phase 按 need_confirmation / existing_apps / selector_miss / done 分别处理,不要重复提交创建表单"),
+		mcp.WithDescription("代用户创建平台应用并自动完成接入:先幂等检查(已有应用或已停在应用详情页就不新建,直接走 capture),未确认时只返回 need_confirmation 让你用选择框征求同意;确认后自动填写应用名并提交创建表单、验证跳转,最后自动抓取凭据→写 .env→热重载。登录(扫码/验证码)仍需人工;权限开通与版本发布可继续调用 hub.onboard.setup 自动完成。返回 phase 按 need_confirmation / existing_apps / selector_miss / done 分别处理,不要重复提交创建表单"),
 		mcp.WithString("platform", mcp.Required(), mcp.Description("要接入的平台: feishu / dingtalk / wecom / tencent-docs(当前仅 feishu 定义了创建动作)")),
 		mcp.WithString("app_name", mcp.Description("应用名称,默认 mcp-hub;需用户确认后再传")),
 		mcp.WithBoolean("confirmed", mcp.Description("用户是否已通过选择框明确同意创建应用。为 true 才会真正提交表单,false 时仅返回 need_confirmation")),
@@ -220,6 +220,43 @@ func main() {
 				hr.SetCredentials(platform, true)
 				return nil
 			})
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := json.MarshalIndent(res, "", "  ")
+		return mcp.NewToolResultText(string(out)), nil
+	})
+
+	// 接入全链路:自动点进应用 → 代建应用(如需) → 抓凭据 → 开权限 → 发布版本。
+	// 用户只做登录与一次选择框确认,其余由 Hub 在调试 Chrome 里代做。
+	hub.AddTool(mcp.NewTool("hub.onboard.setup",
+		mcp.WithDescription("端到端完成平台接入:自动打开或创建应用详情页、抓取 App ID/Secret 写入 .env 并热重载、开通 Hub 所需权限、创建版本并申请发布。用户只需在浏览器里登录并确认一次动作清单,无需手动点击应用、无需去终端执行命令。confirmed=false 只返回 plan,不产生任何变更;confirmed=true 后每个阶段独立返回状态(already_done=平台侧原本已完成、selector_miss=需按 candidates 校准)。任一步失败立即停止后续提交并回传页面候选元素,不要重复调用提交。当前仅 feishu 支持;登录与管理员审批仍需人工"),
+		mcp.WithString("platform", mcp.Required(), mcp.Description("要接入的平台: feishu / dingtalk / wecom / tencent-docs(当前仅 feishu 定义了配置与发布动作)")),
+		mcp.WithString("app_name", mcp.Description("应用名称,默认 mcp-hub;仅列表为空需要创建时使用")),
+		mcp.WithBoolean("confirmed", mcp.Description("用户是否已通过选择框明确同意动作清单。true 才会创建应用/开通权限/提交版本,false 时只返回 plan")),
+	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		platform := req.GetString("platform", "")
+		res, err := onboard.Setup(platform, req.GetString("app_name", ""), req.GetBool("confirmed", false),
+			func(map[string]string) error {
+				if err := reloadPlatform(ctx, platform, *configPath, mgr); err != nil {
+					return err
+				}
+				hr.SetCredentials(platform, true)
+				return nil
+			})
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := json.MarshalIndent(res, "", "  ")
+		return mcp.NewToolResultText(string(out)), nil
+	})
+
+	// 只读诊断:dump 页面上的按钮文本/输入框 placeholder,用于校准声明式 Ops。
+	hub.AddTool(mcp.NewTool("hub.onboard.inspect",
+		mcp.WithDescription("只读地查看调试 Chrome 里当前应用详情页的 URL、可见按钮/链接文本、输入框 placeholder 与页面文本,用于定位选择器未命中的原因并校准自动开通权限/发布版本的动作。不点击、不填表、不改页面,可安全反复调用"),
+		mcp.WithString("platform", mcp.Required(), mcp.Description("要查看的平台: feishu / dingtalk / wecom / tencent-docs")),
+	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		res, err := onboard.Inspect(req.GetString("platform", ""))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

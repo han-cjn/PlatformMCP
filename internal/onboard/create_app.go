@@ -120,8 +120,9 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 	if len(apps) > 0 {
 		res.Phase = "existing_apps"
 		res.ExistingApps = apps
-		res.Next = "检测到已有应用,为避免在企业里重复创建不新建;请点进任一应用的「凭证与基础信息」页," +
-			"然后调用 hub.onboard.capture 完成接号(无需登录、无需创建、无需终端命令)"
+		res.Next = "检测到已有应用,为避免在企业里重复创建不新建;" +
+			"调用 hub.onboard.setup 会自动打开该应用详情页并完成抓凭据与后续配置(无需用户点击、无需登录、无需终端命令);" +
+			"只需抓凭据时才让用户点进「凭证与基础信息」页再调 hub.onboard.capture"
 		return res, nil
 	}
 
@@ -174,12 +175,12 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 	if res.Capture.Phase != "done" {
 		res.Phase = "create_failed"
 		res.Message = "应用已创建,但自动收尾未完成(capture.phase=" + res.Capture.Phase + ")"
-		res.Next = "按 capture.next 继续;通常需要用户在浏览器里开通权限并发布应用"
+		res.Next = "按 capture.next 继续;权限开通与版本发布可调用 hub.onboard.setup 自动完成,无需用户手动操作"
 		return res, nil
 	}
 	res.Phase = "done"
 	res.Next = "应用已创建且凭据已写入 .env 并完成热重载;请调 hub.health 确认 credentials=true / mounted=true," +
-		"并提醒用户在开放平台开通所需权限、创建版本并发布"
+		"权限开通与版本发布可继续调用 hub.onboard.setup 自动完成"
 	return res, nil
 }
 
