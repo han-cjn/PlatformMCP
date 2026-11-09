@@ -153,6 +153,21 @@ func main() {
 		return mcp.NewToolResultText(string(out)), nil
 	})
 
+	// 接入引导的执行入口:Agent 在用户选完平台后立即调用,自动起调试 Chrome 并打开
+	// 开放平台页面。全程不读 stdin、不等人工输入,stdio 宿主(无 TTY)下同样安全;
+	// 登录/建应用/发布仍需人工,凭据抄写由后续的 -onboard-browser 终端向导完成。
+	hub.AddTool(mcp.NewTool("hub.onboard.start",
+		mcp.WithDescription("启动指定平台的接入流程:自动启动带调试端口的 Chrome 并在其中打开该平台开放平台页面(浏览器会真的弹出)。用户选择要接入的平台后立即调用此工具,不要只把命令打印给用户。返回已完成的动作与后续人工步骤;登录/创建应用/发布必须人工完成"),
+		mcp.WithString("platform", mcp.Required(), mcp.Description("要接入的平台: feishu / dingtalk / wecom / tencent-docs")),
+	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		res, err := onboard.StartPlatform(req.GetString("platform", ""))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := json.MarshalIndent(res, "", "  ")
+		return mcp.NewToolResultText(string(out)), nil
+	})
+
 	// P0-3:会话枚举——飞书实时拉取群列表,企微/钉钉来自消息帧沉淀的缓存
 	hub.AddTool(mcp.NewTool("hub.chats",
 		mcp.WithDescription("枚举可用会话:飞书走 im_v1_chat_list;企微/钉钉来自已接收消息帧缓存"),

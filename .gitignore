@@ -34,6 +34,9 @@ Thumbs.db
 .idea/
 .cursor/
 
+# WorkBuddy 工作区数据(会话/记忆日志,本地保留)
+.workbuddy/
+
 # 调试脚本与临时验收工具(本地保留,不入库)
 debug/
 
