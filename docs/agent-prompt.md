@@ -208,21 +208,28 @@
 1. 先调用 `hub.onboard.status` 查看缺凭据的平台
 2. `missing` 非空 → 用选择框让用户挑选要接入的平台
 3. **用户选中后立即调用 `hub.onboard.start`**(参数 `platform` = 选中项)。
-   该工具会自动启动带调试端口的 Chrome 并打开该平台开放平台页面,**浏览器会真的弹出来**。
-   **不要只把命令打印给用户,也不要让用户自己先去终端跑脚本** —— 选完就调用。
-4. 把工具返回的 `manual_steps` 与 `next` 转述给用户:
-   在浏览器里完成登录 / 创建应用 / 开权限 / 发布(自动化绝不碰登录);
-   完成后在终端跑 `go run ./cmd/hub -config config.json -onboard <平台> -onboard-browser`,
-   浏览器执行器会抄写凭据 → 写 `.env` → 真连校验 → 热重载
-5. `missing` 为空 → 直接告知"四个平台凭据均已配置,无需接入"
+   自动起调试 Chrome 并打开开放平台页面,**浏览器会真的弹出来**。
+   **不要只把命令打印给用户,也不要让用户去终端跑脚本。**
+4. **轮询 `hub.onboard.watch` 监听扫码进度**,不必等用户说"我扫完了":
+   - `waiting_login` → 等几秒继续轮询,期间不要催促
+   - `browser_missing` → 先重试 `watch` 2~3 次(Chrome 刚开标签时调试端点有短暂窗口期),仍失败才重新调用 `hub.onboard.start`,不要一次失败就重开窗口
+   - `logged_in` → 把 `manual_steps` 转述给用户:在浏览器里创建应用、开通权限、
+     发布版本,并点进应用的「凭证与基础信息」页(自动化绝不碰登录与审批)
+5. `watch` 返回 `in_app_detail=true` 时,**立即调用 `hub.onboard.capture`**。
+   它会自动读取 App ID / Secret → 格式校验 → 真连校验 → 写 `.env` → 热重载挂载,
+   全程零终端交互,**替代原先那条 `go run ... -onboard <平台> -onboard-browser` 命令**。
+6. 按 `capture` 的 `phase` 处理:
+   - `done` → 调 `hub.health` 确认 `credentials=true / mounted=true`,回报完成
+   - `waiting_login` / `waiting_app_detail` → 按 `next` 提示,继续轮询后重试
+   - 其他 phase → 转述 `message` 与 `next`,不要当成崩溃
+7. `missing` 为空 → 直接告知"四个平台凭据均已配置,无需接入"
 
 **边界说明**:
 
-- `hub.onboard.start` 只做「起调试 Chrome + 打开页面」两件非交互动作,
-  不读 stdin、不等人工输入,stdio 宿主(无 TTY)下同样安全
-- 登录 / 创建应用 / 发布是平台合规红线,必须人工
-- 向导的凭据输入环节仍需要可交互终端,所以最后一步在终端执行;
-  首次登录后调试 profile 会长期保留登录态,后续重跑可省去扫码
+- 三个工具都不读 stdin、不向 stdout 打印向导文本,stdio 宿主(无 TTY)下安全
+- 登录 / 创建应用 / 开权限 / 发布是平台合规红线,必须人工在浏览器里点;
+  但**用户不需要切换到终端执行任何命令**
+- 首次登录后调试 profile 会长期保留登录态,后续重跑可省去扫码
 
 ---
 

@@ -155,12 +155,46 @@ func main() {
 
 	// 接入引导的执行入口:Agent 在用户选完平台后立即调用,自动起调试 Chrome 并打开
 	// 开放平台页面。全程不读 stdin、不等人工输入,stdio 宿主(无 TTY)下同样安全;
-	// 登录/建应用/发布仍需人工,凭据抄写由后续的 -onboard-browser 终端向导完成。
+	// 登录/建应用/发布仍需人工,后续由 watch/capture 接管,不再要求用户去终端敲命令。
 	hub.AddTool(mcp.NewTool("hub.onboard.start",
 		mcp.WithDescription("启动指定平台的接入流程:自动启动带调试端口的 Chrome 并在其中打开该平台开放平台页面(浏览器会真的弹出)。用户选择要接入的平台后立即调用此工具,不要只把命令打印给用户。返回已完成的动作与后续人工步骤;登录/创建应用/发布必须人工完成"),
 		mcp.WithString("platform", mcp.Required(), mcp.Description("要接入的平台: feishu / dingtalk / wecom / tencent-docs")),
 	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		res, err := onboard.StartPlatform(req.GetString("platform", ""))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := json.MarshalIndent(res, "", "  ")
+		return mcp.NewToolResultText(string(out)), nil
+	})
+
+	// 扫码进度监听:纯只读,供 Agent 轮询感知用户是否已扫码/已进入应用详情页,
+	// 用户不必在对话里说"我扫完了"。
+	hub.AddTool(mcp.NewTool("hub.onboard.watch",
+		mcp.WithDescription("监听接入进度:读取调试 Chrome 的标签 URL,判断用户是否已扫码登录(waiting_login → logged_in)、是否已进入应用「凭证与基础信息」页(in_app_detail)。无副作用、不阻塞,可每隔数秒轮询;检测到 logged_in 后自动继续,不要让用户回报或去终端执行命令"),
+		mcp.WithString("platform", mcp.Required(), mcp.Description("要接入的平台: feishu / dingtalk / wecom / tencent-docs")),
+	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		res, err := onboard.Watch(req.GetString("platform", ""))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := json.MarshalIndent(res, "", "  ")
+		return mcp.NewToolResultText(string(out)), nil
+	})
+
+	// 接入收尾:在 Hub 进程内完成凭据抓取→校验→写盘→热重载,零 TTY、零 stdout 输出。
+	hub.AddTool(mcp.NewTool("hub.onboard.capture",
+		mcp.WithDescription("自动完成接入收尾:从浏览器应用详情页读取 App ID/Secret → 格式校验 → 真连校验 → 写入 .env → 热重载挂载。全程无需终端、无需用户执行任何命令,替代 `go run ... -onboard <平台> -onboard-browser`。前置条件是用户已扫码登录并进入应用「凭证与基础信息」页;未满足时返回 waiting_login / waiting_app_detail 等 phase(不是错误),按 next 提示继续轮询或转述给用户"),
+		mcp.WithString("platform", mcp.Required(), mcp.Description("要接入的平台: feishu / dingtalk / wecom / tencent-docs")),
+	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		platform := req.GetString("platform", "")
+		res, err := onboard.Capture(platform, func(map[string]string) error {
+			if err := reloadPlatform(ctx, platform, *configPath, mgr); err != nil {
+				return err
+			}
+			hr.SetCredentials(platform, true)
+			return nil
+		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -581,6 +615,22 @@ func capToolHandler(ctx context.Context, cap *semantic.Capability, mgr *adapter.
 	}
 }
 
+// reloadPlatform 写盘+Setenv 之后重新 Load 配置并热重载该平台挂载。
+// http 类平台(如 tencent-docs)的 headers 展开发生在 config.Load,必须重读
+// config.json 才能带上新 Token;终端向导与 hub.onboard.capture 共用此逻辑。
+func reloadPlatform(ctx context.Context, platform, configPath string, mgr *adapter.Manager) error {
+	fresh, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	for _, sc := range fresh.Servers {
+		if sc.Name == platform {
+			return mgr.Reload(ctx, sc)
+		}
+	}
+	return fmt.Errorf("config.json 中找不到平台 %s 的 servers 定义", platform)
+}
+
 // runOnboard 接入向导入口:完成后重载配置(http headers 需重新展开)+热重载挂载+路由自检+体检表。
 func runOnboard(ctx context.Context, platform string, useBrowser, verifyOnly bool, configPath string, cfg *config.Config, hr *health.Registry, mgr *adapter.Manager) {
 	p, ok := onboard.FindPortal(platform)
@@ -591,19 +641,8 @@ func runOnboard(ctx context.Context, platform string, useBrowser, verifyOnly boo
 	opts := onboard.Options{
 		Browser:    useBrowser,
 		VerifyOnly: verifyOnly,
-		Reload: func(env map[string]string) error {
-			// http 类平台(如 tencent-docs)的 headers 展开发生在 config.Load,
-			// 写盘+Setenv 之后必须重新 Load 才能带上新 Token
-			fresh, err := config.Load(configPath)
-			if err != nil {
-				return err
-			}
-			for _, sc := range fresh.Servers {
-				if sc.Name == platform {
-					return mgr.Reload(ctx, sc)
-				}
-			}
-			return fmt.Errorf("config.json 中找不到平台 %s 的 servers 定义", platform)
+		Reload: func(map[string]string) error {
+			return reloadPlatform(ctx, platform, configPath, mgr)
 		},
 	}
 	if err := onboard.Run(p, opts); err != nil {

@@ -160,7 +160,15 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **自动引导**：启动时检测到某平台缺凭据，终端直跑（有 TTY）会自动逐个进入交互向导，完成即热重载、全部接入后继续启动。WorkBuddy 等 stdio 宿主（stdin 是管道）跳过交互，只在 stderr 打一条指引日志。可用 `HUB_NO_AUTO_ONBOARD=1` 关闭（CI/测试环境）。
 
-**Agent 驱动的接入**（stdio 宿主推荐）：`hub.onboard.status` 返回缺凭据平台清单，Agent 用选择框让用户挑选；选中后调用 `hub.onboard.start`（参数 `platform`），Hub 自动启动带调试端口的 Chrome 并在其中打开该平台开放平台页面。该工具只做两件非交互动作，不读 stdin、不等人工输入，stdio 模式下不会阻塞协议通道。登录/创建应用/发布仍需人工，完成后在终端跑 `-onboard <平台> -onboard-browser` 完成凭据抄写、真连校验与热重载。Chrome 子进程的 stdio 全部丢弃、`Setsid` 脱离会话，Hub 退出不影响浏览器。
+**Agent 驱动的接入**（stdio 宿主推荐）：三个工具串成全自动链路，用户只需在浏览器里扫码与点按钮，**无需切换到终端执行任何命令**：
+
+| 工具 | 作用 |
+|---|---|
+| `hub.onboard.start(platform)` | 起带调试端口的 Chrome 并打开开放平台页面 |
+| `hub.onboard.watch(platform)` | 轮询 CDP 标签 URL，监听扫码完成 / 进入应用详情页 |
+| `hub.onboard.capture(platform)` | 读 App ID/Secret → 校验 → 写 `.env` → 热重载挂载 |
+
+`watch` 靠 URL 信号判定阶段（登录页 `accounts.feishu.cn/.../login` → `open.feishu.cn/app` → 详情页 `/app/<appId>/...`），无需读 cookie 或碰登录动作。`capture` 不复用交互式向导 `Run()`（它全程 `fmt.Printf` 到 stdout 且有 5 处阻塞读终端），而是只执行凭据读取类浏览器动作，零 TTY、零 stdout 输出。Chrome 子进程的 stdio 全部丢弃、`Setsid` 脱离会话，Hub 退出不影响浏览器；CDP 请求显式禁用代理，避免宿主 `HTTP_PROXY` 把 `127.0.0.1` 转发成 502。
 
 四平台凭据配置有交互式向导，含真连校验：
 
