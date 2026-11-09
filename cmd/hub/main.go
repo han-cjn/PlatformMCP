@@ -297,6 +297,11 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	printHealthTable(hr, routeIssues)
 
+	// 自动接入向导:检测缺凭据的平台。有 TTY(终端直跑)时逐个进交互向导,
+	// 完成后热重载+复打体检表再进服务;无 TTY(stdio 宿主)只打指引不阻塞协议通道。
+	// HUB_NO_AUTO_ONBOARD=1 可关闭(如 CI/测试环境)。
+	maybeAutoOnboard(ctx, *configPath, cfg, hr, mgr, routeIssues, *onboardBrowser)
+
 	slog.Info("MCP Hub 启动", "platforms", mgr.Platforms(), "tools", len(mgr.Tools()), "db", dbPath)
 
 	// 手动补跑模式:执行一次日报后退出(不进 stdio 服务)
@@ -395,6 +400,58 @@ func printHealthTable(hr *health.Registry, routeIssues []adapter.RouteIssue) {
 		fmt.Fprintf(os.Stderr, "  路由自检问题 %d 条(详见上方 ERROR 日志)\n", len(routeIssues))
 	}
 	fmt.Fprintln(os.Stderr, "==================================================")
+}
+
+// maybeAutoOnboard 自动向导编排:找出缺凭据的平台,有 TTY 时逐个进交互向导,
+// 全部完成后热重载已生效,复打一次体检表再返回(主流程继续进 MCP 服务)。
+func maybeAutoOnboard(ctx context.Context, configPath string, cfg *config.Config,
+	hr *health.Registry, mgr *adapter.Manager, routeIssues []adapter.RouteIssue, browser bool) {
+
+	if os.Getenv("HUB_NO_AUTO_ONBOARD") != "" {
+		return
+	}
+	var missing []string
+	for _, p := range onboard.PlatformOrder() {
+		if len(onboard.MissingCreds(p)) > 0 {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+
+	if !onboard.InteractiveTTY() {
+		// stdio 宿主(WorkBuddy 等):提示用户去终端跑,不阻塞协议初始化
+		slog.Warn("检测到缺凭据的平台,Hub 以降级模式启动;在终端执行以下命令完成接入(含热重载):",
+			"platforms", missing, "hint", "go run ./cmd/hub -config config.json -onboard <平台名>")
+		return
+	}
+
+	// TTY 是 /dev/null(测试探针/重定向):stdin 是字符设备但不可交互,跳过防死循环
+	if same, _ := onboard.StdinIsDevNull(); same {
+		slog.Warn("检测到缺凭据的平台,但 stdin 为 /dev/null,跳过自动向导(降级启动)", "platforms", missing)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "\n⚠️  检测到 %d 个平台缺少凭据: %s\n", len(missing), strings.Join(missing, ", "))
+	fmt.Fprintln(os.Stderr, "即将进入交互式接入向导(浏览器代填需先 ./scripts/chrome-debug.sh 启动调试 Chrome)。")
+	fmt.Fprintln(os.Stderr, "每个向导完成即热重载生效;全部完成后 Hub 自动继续启动。")
+
+	for _, p := range missing {
+		fmt.Fprintf(os.Stderr, "---------------- %s ----------------\n", p)
+		runOnboard(ctx, p, browser, false, configPath, cfg, hr, mgr) // 失败时内部 os.Exit(1)
+	}
+
+	fmt.Fprintln(os.Stderr, "\n==================== 接入完成,重新体检 ====================")
+	// runOnboard 内部已逐个热重载;这里复打体检表反映最终状态
+	fresh, err := config.Load(configPath)
+	if err == nil {
+		cfg = fresh
+	}
+	routeIssues = mgr.ValidateRoutes(cfg.Routes, hr)
+	printHealthTable(hr, routeIssues)
+	fmt.Fprintln(os.Stderr, "==========================================================")
+	fmt.Fprintln(os.Stderr)
 }
 
 func getenvDefault(key, def string) string {

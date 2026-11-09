@@ -158,6 +158,8 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 ## 接入向导
 
+**自动引导**：启动时检测到某平台缺凭据，终端直跑（有 TTY）会自动逐个进入交互向导，完成即热重载、全部接入后继续启动。WorkBuddy 等 stdio 宿主（stdin 是管道）跳过交互，只在 stderr 打一条指引日志。可用 `HUB_NO_AUTO_ONBOARD=1` 关闭（CI/测试环境）。
+
 四平台凭据配置有交互式向导，含真连校验：
 
 ```bash
