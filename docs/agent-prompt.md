@@ -216,6 +216,10 @@
    - 钉钉 `app_list_verified=true` / `tabs_verified=true`:应用列表页、详情页 URL 与 `/baseinfo` / `/permission` / `/version` 三个 tab 已实测,
      Agent 会**自动进入应用列表页、点进已有应用并切到对应 tab**;权限/版本表单字段也已真机校准并可在确认后自动提交,
      但创建应用表单与「保存」后的发布按钮未端到端验证(`dom_verified=false`),这几档标记不要混为一谈
+   - 2026-11-11 钉钉**端到端真机已跑过一次** `setup(confirmed=true)`,结果 `phase=partial`:`capture` 因 Secret 掩码降级、
+     `enable_perms` 在第 2 个权限点 `selector_miss`(第 1 个「立即开通」已真实点击、二次确认框未采集)、
+     `publish` 因已有 `1.0.0 已上线` 判 `already_done`(**没有生成 1.0.1 草稿**)。
+     `dom_verified` 按实测结果保持 false,不能标绿;也不要把 `already_done` 转述成「本次创建/发布了版本」
    - **已配置的平台也要列出**(用户可能想重新接入、重新体检或切换)
    - 选中项的 `id` 作为后续所有工具的 `platform` 参数
    - 只有用户明确说"不接入"时才结束;不要因为 `missing` 为空就跳过选择框
@@ -249,9 +253,12 @@
      按 `step.message` 如实告知,不要当成失败也不要当成完成
    - `steps[].status=not_required` → 工具**只读核对**了该阶段(动作未真机校准、自动点会造成不可逆记录),刻意不提交。
      按 `step.message` 如实转述「未自动执行」,**不要说已开通/已发布,也不要重试或让用户去点一遍按钮**;计入 skipped,不算失败
-   - `steps[].status=applied_unverified` → **表单已提交,但后续动作未自动完成**(钉钉版本「保存」已生成待发布版本,
-     「发布」按钮未真机校准、未自动点击)。按 `step.message` 明确转述「版本已保存、尚未发布,需人工在后台核对后发布」,
-     **不要说已发布,也不要自动重试提交**;计入 skipped,不算失败
+   - `steps[].status=applied_unverified` → **已点击提交类动作,但结果未经确认**(钉钉版本「保存」后发布按钮未校准、
+     权限「立即开通」后二次确认框未采集)。按 `step.message` 如实转述:
+     版本阶段说「已保存、尚未发布,需人工核对」;权限阶段说「已点击开通、无法确认是否最终生效,请人工核对开通状态」,
+     **不要说已发布/已开通,也不要自动重试提交或代点确认框**;计入 skipped,不算失败
+   - `steps[].status=already_done` → **幂等跳过**,只代表「平台侧原本已满足条件」(如已有已上线版本),
+     **不代表本次创建/保存/发布了什么**,也不要据此说「生成了新版本」;确认清单里的版本动作会写明跳过条件
    - `capture` 返回 `phase=incomplete` 且 `collected` 含 `DINGTALK_Client_ID` →
      钉钉后台的 `Client Secret` 只显示掩码(平台不提供明文),工具已拒绝把掩码写进 `.env`,
      这是**预期降级不是崩溃**。按 `next` 用表单只向用户索取 `DINGTALK_Client_Secret`,
@@ -297,6 +304,10 @@
   「立即开通」后的二次确认框、创建应用表单未校准**:前者返回 `applied_unverified`,后两者阻断时返回 `selector_miss`,
   都不猜按钮、不重试提交。`app_list_verified` / `tabs_verified` 只代表列表页与三个 tab 的导航实测过,
   与 `dom_verified` 不是一回事。
+  **2026-11-11 端到端真机跑过一次 `setup(dingtalk, confirmed=true)`**:`phase=partial`,
+  `enable_perms` 第 2 个权限点 `selector_miss`、`publish` 因已有 `1.0.0 已上线` 幂等跳过(没生成 1.0.1)。
+  因此 `dom_verified` 按实测保持 false;确认清单已改为写明「已有上线版本则跳过、不产生新记录」,
+  不要向用户承诺会生成版本草稿。二次确认框与发布按钮仍未采集,需要人工登录后另行只读校准。
   钉钉 `Client Secret` 后台只显示掩码,平台不提供明文,必须由用户复制一次后走 `set_credentials`
 - `setup` 权限阶段先用 **API 只读探针**验证,已可用(`api_verified`)或无法确认(`skipped`)
   都跳过 UI 开通;发布阶段先做只读幂等检测,已完成就跳过。各阶段**独立执行**,

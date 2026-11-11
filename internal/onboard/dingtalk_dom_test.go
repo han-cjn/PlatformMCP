@@ -1,6 +1,7 @@
 package onboard
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -145,6 +146,14 @@ func TestDingtalkStageDoneOnRealPages(t *testing.T) {
 			t.Fatalf("%s 的确认清单未提示会在企业内产生记录: %q", s.ID, s.PlanLine)
 		}
 	}
+	// 端到端真机:第 1 个权限点「立即开通」已点击,但二次确认框 DOM 未采集。
+	// 即使 apply Ops 全跑完也不能标 done,必须 applied_unverified 如实降级。
+	perms := byID["enable_perms"]
+	for _, want := range []string{"二次确认框", "无法确认", "不重试提交"} {
+		if !strings.Contains(perms.ApplyWarning, want) {
+			t.Fatalf("权限阶段未如实标注二次确认框边界 %q: %q", want, perms.ApplyWarning)
+		}
+	}
 }
 
 // 每个 Match 都要能在真机可见文本上命中;旧版推测按钮不得残留。
@@ -284,6 +293,46 @@ func TestDingtalkApplyOpsUseRealFormFields(t *testing.T) {
 	})
 	if len(failed) != 0 || len(skipped) != 1 {
 		t.Fatalf("applied_unverified 应计入 skipped 而非失败: %v / %v", failed, skipped)
+	}
+}
+
+// 2026-11-11 19:38 真机 setup(dingtalk, confirmed=true) 的返回结果(脱敏)。
+// 用途:把「端到端实测没有跑通」这个事实固化成回归样本,防止以后有人把
+// publish=already_done 当成「版本已创建」、或把 selector_miss 洗成 done。
+// 原始留证:/tmp/setup-true-20261111.json;执行耗时 8.85s(<25s 会话上限)。
+const dingE2ESteps = `[
+ {"id":"open_app","status":"already_open"},
+ {"id":"capture","status":"incomplete","message":"Client Secret 只显示掩码"},
+ {"id":"enable_perms","status":"selector_miss","message":"第 5 步 waitVisible tr[data-row-key] 按 /Calendar.Event.Read/ 未匹配"},
+ {"id":"publish","status":"already_done"}
+]`
+
+func TestDingtalkE2EResultIsHonest(t *testing.T) {
+	steps := []SetupStep{}
+	if err := json.Unmarshal([]byte(dingE2ESteps), &steps); err != nil {
+		t.Fatal(err)
+	}
+	failed, skipped := setupStageOutcomes(steps)
+	// capture 是硬前提,非 done 必须计入 failed;enable_perms 的 selector_miss 同理。
+	if len(failed) != 2 || failed[0] != "capture" || failed[1] != "enable_perms" {
+		t.Fatalf("真机 partial 结果必须如实计入 failed,不能洗成 done: %v / %v", failed, skipped)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("already_done 不该计入 skipped: %v", skipped)
+	}
+	// publish 的 already_done 只代表「已有上线版本、幂等跳过」,不代表本次创建了版本。
+	pub := platformStages(Portals["dingtalk"])[1]
+	if pub.ID != "publish" || !pub.Done(dingVersionText) {
+		t.Fatal("真机版本页应判 already_done")
+	}
+	if !strings.Contains(pub.PlanLine, "幂等跳过") || !strings.Contains(pub.PlanLine, "不产生新记录") {
+		t.Fatalf("确认清单必须写明「已有上线版本则跳过、不生成版本」,避免确认门失真: %q", pub.PlanLine)
+	}
+	// 发布按钮与二次确认框本次都没采集到,dom_verified 必须保持 false。
+	for _, p := range SupportedPlatforms(nil) {
+		if p.ID == "dingtalk" && p.DomVerified {
+			t.Fatal("端到端未跑通(版本表单没进、二次确认框没采集),钉钉 dom_verified 不能置 true")
+		}
 	}
 }
 

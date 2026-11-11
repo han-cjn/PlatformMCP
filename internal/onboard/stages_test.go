@@ -92,6 +92,14 @@ func TestSetupPlanPerPlatform(t *testing.T) {
 			t.Fatalf("钉钉 plan 仍含旧版只读/推测文案 %q: %s", bad, ding)
 		}
 	}
+	// 2026-11-11 端到端真机(confirmed=true):版本页已有 1.0.0 已上线 → publish
+	// 判 already_done、apply 未执行,没有生成 1.0.1。旧版清单却承诺「自动创建
+	// 并保存、会产生版本记录」,与用户确认的动作不一致。清单必须写明跳过条件。
+	for _, want := range []string{"幂等跳过", "不产生新记录", "仅当没有上线版本"} {
+		if !strings.Contains(ding, want) {
+			t.Fatalf("钉钉 plan 未如实说明发布幂等跳过条件 %q: %s", want, ding)
+		}
+	}
 	wecom := strings.Join(setupPlan(Portals["wecom"], "", false), "|")
 	if !strings.Contains(wecom, "收发消息") || !strings.Contains(wecom, "Bot ID") {
 		t.Fatalf("企微 plan 未按平台声明: %s", wecom)

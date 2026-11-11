@@ -19,10 +19,16 @@ import (
 // /「保存」)与 /permission 行级 DOM(tr[data-row-key] + checkbox + span「立即开通」);
 // 企微/腾讯文档的后台 DOM 仍未实测,菜单文本是推测值。
 //
-// dom_verified 只标「创建/权限/发布表单已端到端校准」:钉钉「保存」后的发布
-// 按钮与「立即开通」后的二次确认框未经真机执行(采集它们等于真提交),创建
-// 应用表单也未打开过,故仍为 false;已实测部分由 app_list_verified /
-// tabs_verified 单独标注,未验证边界由 setupStage.ApplyWarning 如实回传。
+// dom_verified 只标「创建/权限/发布表单已端到端校准」。2026-11-11 19:38
+// 真机跑过一次 setup(dingtalk, confirmed=true):phase=partial,
+//   - enable_perms 跑到第 2 个权限点时 selector_miss(第 5 步 waitVisible
+//     tr[data-row-key] 按 /Calendar.Event.Read/ 未命中)——第 1 个权限点的
+//     「立即开通」已执行,二次确认框 DOM 未采集;
+//   - publish 因版本页已有 1.0.0 已上线判 already_done,版本表单页没进,
+//     「保存」后的发布按钮未采集,也没生成 1.0.1 草稿。
+//
+// 因此 dom_verified 保持 false;已实测部分由 app_list_verified /
+// tabs_verified 单独标注,未验证边界由 ApplyWarning / PlanLine 如实回传。
 func platformStages(p *Portal) []setupStage {
 	if p == nil {
 		return nil
@@ -136,6 +142,11 @@ func dingtalkStages() []setupStage {
 			},
 			PlanLine: "按权限点 code 自动开通 " + strings.Join(Portals["dingtalk"].ApplyPerms, " / ") +
 				"(已开通则跳过;每项都会在企业内产生开通记录)",
+			// 2026-11-11 端到端真机:第 1 个权限点的「立即开通」确实被点击过
+			// (apply 第 3 步成功),但第 5 步等第 2 个 code 的行超时,二次确认框
+			// DOM 未采集。即便 Ops 全跑完也不能断言已开通,必须如实标
+			// applied_unverified,并说明可能是弹窗待确认、不自动重试提交。
+			ApplyWarning: "已按行点击「立即开通」,但点击后可能出现的二次确认框未经真机采集,无法确认权限是否最终开通;不自动点确认、不重试提交。请在后台核对开通状态,若有待确认弹窗请人工完成",
 		},
 		{
 			ID: "publish",
@@ -152,7 +163,10 @@ func dingtalkStages() []setupStage {
 			Done: func(text string) bool {
 				return strings.Contains(text, "版本状态") && strings.Contains(text, "已上线")
 			},
-			PlanLine:     "自动创建新版本并保存(版本号沿用后台默认值如 1.0.1;会在企业内产生版本记录)",
+			// 2026-11-11 端到端真机实测:已有 1.0.0 已上线时 Done 判 already_done,
+			// apply 根本不执行,不会生成 1.0.1。旧版清单却承诺「自动创建并保存」,
+			// 用户确认的动作与实际执行不一致 —— 确认门失真,必须如实写清跳过条件。
+			PlanLine:     "检测到已有「已上线」版本则幂等跳过、不产生新记录;仅当没有上线版本时才自动创建新版本并保存(会在企业内产生版本记录)",
 			ApplyWarning: "「保存」后只生成待发布版本;发布按钮未真机校准(采集它等于真发布),不自动点击。请在后台核对版本内容后再手动发布",
 		},
 	}

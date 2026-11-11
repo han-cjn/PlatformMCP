@@ -205,6 +205,19 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **仍未自动化的边界**（不猜按钮）：「保存」后的发布按钮、「立即开通」后的二次确认弹窗、创建应用表单——采集它们等于真提交。前者由 `ApplyWarning` 返回 `status=applied_unverified`（计入 skipped，不算 done、不算失败），消息明确「仅生成待发布版本，发布需人工确认」；后两者若阻断下一步，按既有规则 `selector_miss` 并回传 `candidates`，绝不重试提交。`dom_verified` 因此仍只飞书为 true。
 
+**端到端真机执行**（2026-11-11 第六轮，`setup(platform="dingtalk", confirmed=true)`）：留证 `/tmp/setup-true-20261111.json`，结果 `phase=partial`，**与预期不同**，如实记录：
+
+| 阶段 | 实测 | 说明 |
+|---|---|---|
+| `open_app` | `already_open` | 已有应用详情页，未新建 |
+| `capture` | `incomplete` | `Client Secret` 掩码，按设计拒绝写 `.env`、降级 `set_credentials`；`.env` 实测仍只有飞书两项，无误写 |
+| `enable_perms` | `selector_miss` | apply 第 5 步 `waitVisible tr[data-row-key]` 按 `/Calendar.Event.Read/` 未命中。前 3 步已执行 ⇒ **`Contact.User.Read` 的「立即开通」被真实点击过**，二次确认框 DOM 未采集；第 2 个权限点未执行 |
+| `publish` | `already_done` | 版本页已有 `1.0.0 已上线`，`Done` 判幂等跳过，**没有生成 1.0.1 草稿，也没进版本表单页** ⇒ 发布按钮仍未采集 |
+
+执行耗时 8.85s（<25s 会话上限），第 5 步的 `context deadline exceeded` 是 `ElementR` 单步 6s 超时，属真实 `selector_miss`，不是会话耗尽。执行后只读快照（`/tmp/ding-state-after-20261111.txt`）确认版本表格仍只有 `1.0.0 已上线` 一行、无可见弹窗。据此修两处诚实性问题：① 旧版 `PlanLine` 承诺「自动创建新版本并保存、会产生版本记录」，与实际幂等跳过不一致，改为写明「已有上线版本则跳过、不产生新记录」；② 权限阶段补 `ApplyWarning`，`apply` 全跑完也只标 `applied_unverified`，明确二次确认框未采集、不重试提交。`dom_verified` **按实测结果保持 false**——端到端没跑通就不能标绿，已实测部分由 `app_list_verified` / `tabs_verified` 单独标注。
+
+> 只读诊断 `debug/statecheck` 曾误用 rod 的 `browser.MustClose()`（会发 CDP `Browser.close` 关掉整个调试 Chrome），导致调试浏览器两次「自然退出」；已移除。登录（SSO 扫码）仍必须人工，Hub 不代做。
+
 四平台凭据配置有交互式向导，含真连校验：
 
 ```bash
