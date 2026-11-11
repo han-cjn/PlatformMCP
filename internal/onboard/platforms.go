@@ -29,7 +29,7 @@ var platformNames = map[string]string{
 
 var platformHints = map[string]string{
 	"feishu":       "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准",
-	"dingtalk":     "Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab(真机实测);权限按真机 code 自动「立即开通」,版本仅在无上线版本时创建保存,均需 setup(confirmed=true) 显式确认;Client Secret 后台只显示掩码,需按 next 用 set_credentials 补一次;2026-11-11 端到端实测 phase=partial(第二个权限点 selector_miss、版本因已有 1.0.0 已上线幂等跳过),发布按钮与二次确认框仍未采集,dom_verified 保持 false",
+	"dingtalk":     "Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab(真机实测);权限按真机 code 自动「立即开通」(已开通的行幂等跳过),版本仅在无上线版本时创建保存,均需 setup(confirmed=true) 显式确认;Client Secret 后台只显示掩码,需按 next 用 set_credentials 补一次;2026-11-11 端到端实测 phase=partial(第二个权限点 selector_miss、版本因已有 1.0.0 已上线幂等跳过);扫码后只读复核确认「立即开通」一步生效、无二次确认框,但「保存」后的发布按钮仍需真保存才能采集,dom_verified 保持 false",
 	"wecom":        "支持 Agent 自动创建智能机器人、抓凭据与启用;后台 DOM 未实测,selector_miss 时降级 set_credentials",
 	"tencent-docs": "授权页即凭据页,Agent 可自动读 Token 并完成接入;无需建应用/开权限/发布,DOM 未实测时降级 set_credentials",
 }
@@ -65,8 +65,10 @@ func SupportedPlatforms(capabilities map[string][]string) []PlatformInfo {
 			// dom_verified 只标「创建/权限/发布表单已端到端校准」。钉钉 2026-11-11
 			// 已跑过一次 setup(confirmed=true),但 phase=partial:第二个权限点
 			// selector_miss、publish 因已有 1.0.0 已上线被幂等跳过,版本表单页
-			// 根本没进,发布按钮与开通后的二次确认框仍未采集。按「gate 只标
-			// 已验证状态」的规则,这里必须保持 false,不能用部分成功洗成 true。
+			// 根本没进,「保存」后的发布按钮与创建应用表单仍未采集。扫码后只读
+			// 复核补上了「无二次确认框、点击即生效」这一条,但新增的逐 code 状态
+			// 复核 Ops 未经真机执行。按「gate 只标已验证状态」的规则,这里必须
+			// 保持 false,不能用部分成功洗成 true。
 			DomVerified:     id == "feishu",
 			AppListVerified: p != nil && p.AppListURL != "" && p.AppListRowSelector != "",
 			TabsVerified:    p != nil && p.CredTab != "" && p.CredTabFragment != "",

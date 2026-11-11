@@ -80,6 +80,7 @@ type Op struct {
 	MaskRune    rune     // readText 识别的掩码字符(0 表示用 defaultMaskRune)
 	URLExcludes []string // waitURL 命中需排除的 URL 片段(过滤分页/搜索等假命中)
 	Match       string   // JS 正则:按元素可见文本匹配(click/hover/fill),不依赖易变的 class
+	SkipIfMatch string   // clickInRow 专用:行文本命中该正则视为已达成,幂等跳过点击(如钉钉「已开通」)
 	Scope       string   // 适用阶段:"list" 仅应用列表页;"probe" 只读探测;"apply" 有副作用;空/detail 表示详情页可用
 }
 

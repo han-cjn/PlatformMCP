@@ -403,6 +403,10 @@ func (bx *BrowserExecutor) safe(f func()) (err error) {
 //
 // 行或行内按钮没找到时返回普通错误(编排器降级为 selector_miss 并回传候选),
 // 绝不重试提交、不点其他行、不猜可能出现的二次确认弹窗按钮。
+//
+// SkipIfMatch 提供幂等:钉钉 /permission 的权限开通后,行内按钮从「立即开通」
+// 变成「移除权限」。若重跑 setup 时不跳过,第一个已开通权限就会 selector_miss,
+// 后面的权限永远轮不到(2026-11-11 真机部分开通后复核发现)。
 func (bx *BrowserExecutor) clickInRow(op Op) error {
 	if op.Match == "" || op.Text == "" {
 		return fmt.Errorf("clickInRow 需要 Match(行文本正则)与 Text(行内按钮文本)")
@@ -411,6 +415,12 @@ func (bx *BrowserExecutor) clickInRow(op Op) error {
 		row, err := bx.page.Timeout(browserOpTimeout).ElementR(op.Target, op.Match)
 		if err != nil {
 			panic(fmt.Errorf("未找到文本匹配 /%s/ 的行 %q: %w", op.Match, op.Target, err))
+		}
+		if op.SkipIfMatch != "" {
+			rowText, e := row.Text()
+			if e == nil && regexp.MustCompile(op.SkipIfMatch).MatchString(rowText) {
+				return // 该行已达成目标状态,不重复点击
+			}
 		}
 		els, err := row.Elements(rowActionSelector)
 		if err != nil {

@@ -33,6 +33,20 @@ Calendar.Event.Read 无需审批 未开通 立即开通
 snsapi_base 无需审批 已开通 默认开通
 请输入权限或接口的名称进行搜索`
 
+	// 2026-11-11 20:20 扫码恢复登录态后只读复核的 /permission 真机文本。
+	// 关键事实:Contact.User.Read 已被上次 confirmed=true 真实点成「已开通 /
+	// 移除权限」,Calendar.Event.Read 仍「未开通 / 立即开通」,整页无二次确认弹窗。
+	// 这份样本用于锁定「部分开通后重跑」的幂等 SkipIfMatch 与状态复核正则。
+	dingPermissionTextAfterOpen = `权限管理
+选择审核要求 选择开通状态 批量申请
+全部 个人权限 默认目录
+权限信息 接口 权限点code 权限审批 全部状态 操作
+个人手机号信息 获取用户个人信息 Contact.User.mobile 无需审批 未开通 立即开通
+日历应用中日程读权限 查询会议室忙闲 查看更多 Calendar.Event.Read 无需审批 未开通 立即开通
+通讯录个人信息读权限 获取用户个人信息 Contact.User.Read 无需审批 已开通 移除权限
+调用SNS API时需要具备的基本权限 创建快捷方式 查询个人授权记录 snsapi_base 无需审批 已开通 默认开通
+请输入权限或接口的名称进行搜索`
+
 	dingVersionText = `版本管理与发布
 创建新版本
 版本号 版本状态 发布人 发布时间 操作
@@ -146,13 +160,16 @@ func TestDingtalkStageDoneOnRealPages(t *testing.T) {
 			t.Fatalf("%s 的确认清单未提示会在企业内产生记录: %q", s.ID, s.PlanLine)
 		}
 	}
-	// 端到端真机:第 1 个权限点「立即开通」已点击,但二次确认框 DOM 未采集。
-	// 即使 apply Ops 全跑完也不能标 done,必须 applied_unverified 如实降级。
+	// 20:20 扫码后只读复核:点击一步生效、无二次确认框(旧版「可能有确认框」
+	// 已证伪);但新增的逐 code 状态复核 Ops 未经真机执行,仍须 applied_unverified。
 	perms := byID["enable_perms"]
-	for _, want := range []string{"二次确认框", "无法确认", "不重试提交"} {
+	for _, want := range []string{"一步生效", "无二次确认框", "未完整验证", "不重试提交"} {
 		if !strings.Contains(perms.ApplyWarning, want) {
-			t.Fatalf("权限阶段未如实标注二次确认框边界 %q: %q", want, perms.ApplyWarning)
+			t.Fatalf("权限阶段未如实标注端到端验证边界 %q: %q", want, perms.ApplyWarning)
 		}
+	}
+	if strings.Contains(perms.ApplyWarning, "可能出现的二次确认框") {
+		t.Fatalf("二次确认框已被真机证伪,不应继续写成待确认: %q", perms.ApplyWarning)
 	}
 }
 
@@ -161,7 +178,14 @@ func TestDingtalkStageOpsUseRealMenus(t *testing.T) {
 	realTexts := []string{
 		"凭证与基础信息", "权限管理", "版本管理与发布", "批量申请",
 		"创建新版本", "权限点code", "版本状态", "应用凭证", "保存",
-		dingBaseinfoText, dingPermissionText, dingVersionText, dingVersionFormText,
+		dingBaseinfoText, dingPermissionText, dingPermissionTextAfterOpen,
+		dingVersionText, dingVersionFormText,
+		// apply 成功后的目标状态(真机行结构 + 「已开通」)。状态复核 Ops 等的
+		// 就是这个文本,不是推测按钮;Calendar.Event.Read 当前真机仍未开通,
+		// 所以不能要求它在「开通前」样本里也命中。
+		"Contact.User.Read 无需审批 已开通 移除权限\n" +
+			"Calendar.Event.Read 无需审批 已开通 移除权限\n" +
+			"snsapi_base 无需审批 已开通 默认开通",
 	}
 	for _, s := range platformStages(Portals["dingtalk"]) {
 		for _, op := range s.Action.Ops {
@@ -240,11 +264,18 @@ func TestDingtalkApplyOpsUseRealFormFields(t *testing.T) {
 
 	permsApply := opsForScope(byID["enable_perms"].Action, "apply")
 	codes := Portals["dingtalk"].ApplyPerms
-	if len(permsApply) != 3*len(codes) {
-		t.Fatalf("权限 apply 应为每个 code 3 步(过滤→等行→点行内按钮),实际 %d: %+v", len(permsApply), permsApply)
+	// 2026-11-11 真机第 5 步 selector_miss 后补了两步:每个 code 先等搜索框
+	// 重新渲染(点击后的异步刷新),末尾再等该行变「已开通」作为下一个 code
+	// 的稳定锚点;clickInRow 带 SkipIfMatch 让已开通的行幂等跳过。
+	if len(permsApply) != 5*len(codes) {
+		t.Fatalf("权限 apply 应为每个 code 5 步(等搜索框→过滤→等行→点行内按钮→复核已开通),实际 %d: %+v", len(permsApply), permsApply)
 	}
 	for i, code := range codes {
-		fill, wait, click := permsApply[3*i], permsApply[3*i+1], permsApply[3*i+2]
+		b := 5 * i
+		waitBox, fill, wait, click, opened := permsApply[b], permsApply[b+1], permsApply[b+2], permsApply[b+3], permsApply[b+4]
+		if waitBox.Kind != "waitVisible" || !strings.Contains(waitBox.Target, "权限或接口") {
+			t.Fatalf("%s 未等搜索框重新渲染(点击后异步刷新): %+v", code, waitBox)
+		}
 		if fill.Kind != "fill" || fill.Text != code || !strings.Contains(fill.Target, "权限或接口") {
 			t.Fatalf("%s 未按真机搜索框过滤: %+v", code, fill)
 		}
@@ -254,6 +285,13 @@ func TestDingtalkApplyOpsUseRealFormFields(t *testing.T) {
 		if click.Kind != "clickInRow" || click.Target != "tr[data-row-key]" ||
 			click.Match != regexp.QuoteMeta(code) || click.Text != "立即开通" {
 			t.Fatalf("%s 未按行点「立即开通」: %+v", code, click)
+		}
+		openedRe := regexp.QuoteMeta(code) + `\s*无需审批\s*已开通`
+		if click.SkipIfMatch != openedRe {
+			t.Fatalf("%s 缺幂等 SkipIfMatch(已开通的行按钮是「移除权限」): %+v", code, click)
+		}
+		if opened.Kind != "waitVisible" || opened.Target != "tr[data-row-key]" || opened.Match != openedRe {
+			t.Fatalf("%s 缺逐 code 开通状态复核: %+v", code, opened)
 		}
 	}
 	for _, code := range codes {
@@ -328,10 +366,55 @@ func TestDingtalkE2EResultIsHonest(t *testing.T) {
 	if !strings.Contains(pub.PlanLine, "幂等跳过") || !strings.Contains(pub.PlanLine, "不产生新记录") {
 		t.Fatalf("确认清单必须写明「已有上线版本则跳过、不生成版本」,避免确认门失真: %q", pub.PlanLine)
 	}
-	// 发布按钮与二次确认框本次都没采集到,dom_verified 必须保持 false。
+	// 「保存」后的发布按钮与创建应用表单仍未采集,dom_verified 必须保持 false。
+	// 二次确认框已由 20:20 只读复核证伪(点击即生效、无弹窗),不再作为理由。
 	for _, p := range SupportedPlatforms(nil) {
 		if p.ID == "dingtalk" && p.DomVerified {
-			t.Fatal("端到端未跑通(版本表单没进、二次确认框没采集),钉钉 dom_verified 不能置 true")
+			t.Fatal("端到端未跑通(版本表单没进、发布按钮没采集),钉钉 dom_verified 不能置 true")
+		}
+	}
+}
+
+// 2026-11-11 20:20 真机只读复核:上次 confirmed=true 只开成功第 1 个权限点,
+// 权限页现在是「部分开通」状态。重跑时已开通的行按钮变成「移除权限」,
+// SkipIfMatch 必须让它幂等跳过,否则第一个 code 就 selector_miss、
+// 第二个 code 永远轮不到;同时 Done 不能把部分开通误判成阶段已完成。
+func TestDingtalkPermsApplyIdempotentAfterPartialOpen(t *testing.T) {
+	stages := platformStages(Portals["dingtalk"])
+	perms := Portals["dingtalk"].ApplyPerms
+	apply := opsForScope(stages[0].Action, "apply")
+	if len(apply) != 5*len(perms) {
+		t.Fatalf("apply 序列长度异常: %d", len(apply))
+	}
+	lines := strings.Split(dingPermissionTextAfterOpen, "\n")
+	for i, code := range perms {
+		skip := regexp.MustCompile(apply[5*i+3].SkipIfMatch)
+		opened := regexp.MustCompile(apply[5*i+4].Match)
+		found := false
+		for _, line := range lines {
+			if !strings.Contains(line, code) {
+				continue
+			}
+			found = true
+			wantHit := strings.Contains(line, "已开通")
+			if got := skip.MatchString(line); got != wantHit {
+				t.Fatalf("%s 行「%s」SkipIfMatch=%v,期望 %v", code, line, got, wantHit)
+			}
+			if got := opened.MatchString(line); got != wantHit {
+				t.Fatalf("%s 行「%s」状态复核=%v,期望 %v", code, line, got, wantHit)
+			}
+		}
+		if !found {
+			t.Fatalf("真机复核样本缺权限点 %s", code)
+		}
+	}
+	if stages[0].Done(dingPermissionTextAfterOpen) {
+		t.Fatal("部分开通时 Done 不能判阶段已完成,否则第二个权限点会被跳过")
+	}
+	// 二次确认框已证伪,ApplyWarning 不该再写「可能有确认框待人工确认」。
+	for _, bad := range []string{"可能出现的二次确认框", "若有待确认弹窗请人工完成"} {
+		if strings.Contains(stages[0].ApplyWarning, bad) {
+			t.Fatalf("ApplyWarning 仍沿用已被证伪的旧结论: %q", stages[0].ApplyWarning)
 		}
 	}
 }

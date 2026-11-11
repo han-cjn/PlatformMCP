@@ -23,11 +23,18 @@ import (
 // 真机跑过一次 setup(dingtalk, confirmed=true):phase=partial,
 //   - enable_perms 跑到第 2 个权限点时 selector_miss(第 5 步 waitVisible
 //     tr[data-row-key] 按 /Calendar.Event.Read/ 未命中)——第 1 个权限点的
-//     「立即开通」已执行,二次确认框 DOM 未采集;
+//     「立即开通」已执行;
 //   - publish 因版本页已有 1.0.0 已上线判 already_done,版本表单页没进,
 //     「保存」后的发布按钮未采集,也没生成 1.0.1 草稿。
 //
-// 因此 dom_verified 保持 false;已实测部分由 app_list_verified /
+// 20:20 扫码恢复登录态后只读复核:Contact.User.Read 已变「已开通 / 移除权限」,
+// 页面无二次确认弹窗 → 「立即开通」一步生效,旧版「可能有确认框」的猜测证伪;
+// 连续 3 次覆盖式 fill + ElementR 全部命中,证明第 5 步不是选择器/正则问题,
+// 而是点击后列表异步刷新的时序问题(已补逐 code 状态复核与幂等 SkipIfMatch,
+// 但新增序列未经真机端到端执行)。
+//
+// 「保存」后的发布按钮仍无法只读采集(采集它等于真保存/真发布),创建应用表单
+// 也未打开过,因此 dom_verified 保持 false;已实测部分由 app_list_verified /
 // tabs_verified 单独标注,未验证边界由 ApplyWarning / PlanLine 如实回传。
 func platformStages(p *Portal) []setupStage {
 	if p == nil {
@@ -107,9 +114,9 @@ func feishuStages() []setupStage {
 //     表单页(不是弹窗),input#version 已默认填 1.0.1,填描述后点「保存」。
 //     真机核查:点开这个按钮本身没有产生任何版本记录。
 //
-// 未采集、因此绝不猜的边界:「立即开通」后的二次确认框、保存后的「发布」
-// 按钮。前者若出现会让下一步 selector_miss 并回传候选元素;后者由
-// ApplyWarning 明确告知「仅生成待发布版本,发布需人工确认」。
+// 未采集、因此绝不猜的边界只剩「保存」后的「发布」按钮(采集它等于真保存)。
+// 「立即开通」的二次确认框已由只读复核证伪:点击即生效、页面无弹窗。
+// 版本阶段由 ApplyWarning 明确告知「仅生成待发布版本,发布需人工确认」。
 func dingtalkStages() []setupStage {
 	permsOps := []Op{
 		{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*权限管理\s*$`, Scope: "probe"},
@@ -119,10 +126,22 @@ func dingtalkStages() []setupStage {
 	}
 	for _, code := range Portals["dingtalk"].ApplyPerms {
 		re := regexp.QuoteMeta(code)
+		openedRe := re + `\s*无需审批\s*已开通`
 		permsOps = append(permsOps,
+			// 点「立即开通」会触发列表异步刷新。下一个 code 先等搜索框重新渲染
+			// 完成,避免 fill 落在过渡态 DOM 上 —— 2026-11-11 真机第 5 步
+			// (第二个 code 的 waitVisible)就是这样 context deadline exceeded 的;
+			// 只读复现证明连续 3 次覆盖式 fill + ElementR 本身全部命中,
+			// 选择器与正则都没问题,问题出在点击后的页面状态。
+			Op{Kind: "waitVisible", Target: `input[placeholder*="权限或接口"]`, Scope: "apply"},
 			Op{Kind: "fill", Target: `input[placeholder*="权限或接口"]`, Text: code, Scope: "apply"},
 			Op{Kind: "waitVisible", Target: "tr[data-row-key]", Match: re, Scope: "apply"},
-			Op{Kind: "clickInRow", Target: "tr[data-row-key]", Match: re, Text: "立即开通", Scope: "apply"},
+			// 已开通的行按钮是「移除权限」,SkipIfMatch 让它幂等跳过而不是 selector_miss。
+			Op{Kind: "clickInRow", Target: "tr[data-row-key]", Match: re, Text: "立即开通",
+				SkipIfMatch: openedRe, Scope: "apply"},
+			// 逐 code 复核开通状态:既验证点击真的生效,也把「页面刷新完成」
+			// 作为下一个 code 的稳定起点,不靠固定 sleep 猜时序。
+			Op{Kind: "waitVisible", Target: "tr[data-row-key]", Match: openedRe, Scope: "apply"},
 		)
 	}
 	return []setupStage{
@@ -142,11 +161,14 @@ func dingtalkStages() []setupStage {
 			},
 			PlanLine: "按权限点 code 自动开通 " + strings.Join(Portals["dingtalk"].ApplyPerms, " / ") +
 				"(已开通则跳过;每项都会在企业内产生开通记录)",
-			// 2026-11-11 端到端真机:第 1 个权限点的「立即开通」确实被点击过
-			// (apply 第 3 步成功),但第 5 步等第 2 个 code 的行超时,二次确认框
-			// DOM 未采集。即便 Ops 全跑完也不能断言已开通,必须如实标
-			// applied_unverified,并说明可能是弹窗待确认、不自动重试提交。
-			ApplyWarning: "已按行点击「立即开通」,但点击后可能出现的二次确认框未经真机采集,无法确认权限是否最终开通;不自动点确认、不重试提交。请在后台核对开通状态,若有待确认弹窗请人工完成",
+			// 2026-11-11 20:20 扫码恢复登录态后只读复核:权限页
+			// Contact.User.Read 已是「已开通 / 移除权限」,整页无二次确认弹窗
+			// → 「立即开通」是一步生效、不存在待确认框,旧文案里「可能出现的
+			// 二次确认框」已被证伪。但上次端到端只跑通第 1 个 code(第 2 个
+			// selector_miss),本轮新增的逐 code 状态复核 Ops 也未经真机执行,
+			// 因此仍标 applied_unverified:如实说明「新增序列未端到端验证」,
+			// 而不是笼统说无法确认开通状态。
+			ApplyWarning: "真机只读复核:「立即开通」一步生效、页面无二次确认框;但上次端到端只跑通第 1 个权限点(第 2 个 selector_miss),本轮新增的逐 code 状态复核尚未真机执行,故按未完整验证标注,不重试提交。请在后台核对各权限点状态",
 		},
 		{
 			ID: "publish",

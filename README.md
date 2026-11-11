@@ -203,7 +203,7 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **钉钉表单自动提交**（2026-11-11 第五轮真机只读校准）：调试 Chrome 里只读点开「创建新版本」后确认它是同标签路由跳到 `/version/app_publish/new`（不是弹窗），字段为 `input#version`（默认 1.0.1）、`textarea#description`、应用可用范围 radio，按钮只有「保存」；只读核查版本表格仍只有 `1.0.0 已上线` 一行，**点开按钮本身不产生记录**。`/permission` 页每行是 `tr[data-row-key]`，文本含英文 code 与 `span「立即开通」`，「批量申请」按钮带 `disabled`（未勾选时无反应）。据此新增 `clickInRow` Op：按行文本正则定位 `tr`，再点该行内文本为 `Text` 的子元素，避免误开别的权限；`Portal.ApplyPerms` 只列真机未开通的 code（`snsapi_base` 默认已开通、行内无按钮，只进 `Perms`）。`confirmed=true` 后：权限阶段用搜索框按 code 过滤 → 等行 → 点该行「立即开通」；版本阶段点「创建新版本」→ 等 `input#version` → 填 `textarea#description` → 点「保存」。`PlanLine` 把「会在企业内产生开通/版本记录」写进确认清单。
 
-**仍未自动化的边界**（不猜按钮）：「保存」后的发布按钮、「立即开通」后的二次确认弹窗、创建应用表单——采集它们等于真提交。前者由 `ApplyWarning` 返回 `status=applied_unverified`（计入 skipped，不算 done、不算失败），消息明确「仅生成待发布版本，发布需人工确认」；后两者若阻断下一步，按既有规则 `selector_miss` 并回传 `candidates`，绝不重试提交。`dom_verified` 因此仍只飞书为 true。
+**仍未自动化的边界**（不猜按钮）：「保存」后的发布按钮与创建应用表单——采集它们等于真提交。版本阶段由 `ApplyWarning` 返回 `status=applied_unverified`（计入 skipped，不算 done、不算失败），消息明确「仅生成待发布版本，发布需人工确认」；若未校准的按钮阻断下一步，按既有规则 `selector_miss` 并回传 `candidates`，绝不重试提交。`dom_verified` 因此仍只飞书为 true。「立即开通」的二次确认弹窗已由 20:20 只读复核**证伪**（见第七轮），不再是待采集项。
 
 **端到端真机执行**（2026-11-11 第六轮，`setup(platform="dingtalk", confirmed=true)`）：留证 `/tmp/setup-true-20261111.json`，结果 `phase=partial`，**与预期不同**，如实记录：
 
@@ -211,10 +211,12 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 |---|---|---|
 | `open_app` | `already_open` | 已有应用详情页，未新建 |
 | `capture` | `incomplete` | `Client Secret` 掩码，按设计拒绝写 `.env`、降级 `set_credentials`；`.env` 实测仍只有飞书两项，无误写 |
-| `enable_perms` | `selector_miss` | apply 第 5 步 `waitVisible tr[data-row-key]` 按 `/Calendar.Event.Read/` 未命中。前 3 步已执行 ⇒ **`Contact.User.Read` 的「立即开通」被真实点击过**，二次确认框 DOM 未采集；第 2 个权限点未执行 |
+| `enable_perms` | `selector_miss` | apply 第 5 步 `waitVisible tr[data-row-key]` 按 `/Calendar.Event.Read/` 未命中。前 3 步已执行 ⇒ **`Contact.User.Read` 的「立即开通」被真实点击过**（20:20 只读复核确认它已变「已开通 / 移除权限」、页面无二次确认弹窗）；第 2 个权限点未执行 |
 | `publish` | `already_done` | 版本页已有 `1.0.0 已上线`，`Done` 判幂等跳过，**没有生成 1.0.1 草稿，也没进版本表单页** ⇒ 发布按钮仍未采集 |
 
-执行耗时 8.85s（<25s 会话上限），第 5 步的 `context deadline exceeded` 是 `ElementR` 单步 6s 超时，属真实 `selector_miss`，不是会话耗尽。执行后只读快照（`/tmp/ding-state-after-20261111.txt`）确认版本表格仍只有 `1.0.0 已上线` 一行、无可见弹窗。据此修两处诚实性问题：① 旧版 `PlanLine` 承诺「自动创建新版本并保存、会产生版本记录」，与实际幂等跳过不一致，改为写明「已有上线版本则跳过、不产生新记录」；② 权限阶段补 `ApplyWarning`，`apply` 全跑完也只标 `applied_unverified`，明确二次确认框未采集、不重试提交。`dom_verified` **按实测结果保持 false**——端到端没跑通就不能标绿，已实测部分由 `app_list_verified` / `tabs_verified` 单独标注。
+执行耗时 8.85s（<25s 会话上限），第 5 步的 `context deadline exceeded` 是 `ElementR` 单步 6s 超时，属真实 `selector_miss`，不是会话耗尽。执行后只读快照（`/tmp/ding-state-after-20261111.txt`）确认版本表格仍只有 `1.0.0 已上线` 一行、无可见弹窗。据此修两处诚实性问题：① 旧版 `PlanLine` 承诺「自动创建新版本并保存、会产生版本记录」，与实际幂等跳过不一致，改为写明「已有上线版本则跳过、不产生新记录」；② 权限阶段补 `ApplyWarning`，`apply` 全跑完也只标 `applied_unverified`，明确未完整验证、不重试提交。`dom_verified` **按实测结果保持 false**——端到端没跑通就不能标绿，已实测部分由 `app_list_verified` / `tabs_verified` 单独标注。
+
+**扫码恢复登录态后的只读复核与修复**（2026-11-11 第七轮）：SSO 挑战页人工扫码后，用纯只读 DOM 快照（`/tmp/ding-peek-all-20261111.txt`、`/tmp/ding-elementr2-20261111.txt`）拿到三条硬事实：① `Contact.User.Read` 已是「已开通 / 移除权限」，整页无二次确认弹窗 ⇒「立即开通」**一步生效**，旧版「可能有确认框」的猜测证伪；② `Calendar.Event.Read` 仍「未开通」，且连续 3 次覆盖式 `fill` + `ElementR` 全部命中 ⇒ 第 5 步不是选择器/正则问题，而是点击后列表异步刷新让下一次 `fill/waitVisible` 落在过渡态；③ 已上线版本的详情页只有「查看 / 查看版本详情」，没有发布按钮 ⇒ **采集「保存」后的发布按钮只能真保存，无法只读取得**。据此把权限 apply 从每 code 3 步改为 5 步：先等搜索框重新渲染 → 按 code 过滤 → 等行 → `clickInRow` 带 `SkipIfMatch`（已开通的行按钮是「移除权限」，幂等跳过而不是 `selector_miss`）→ 等该行变「已开通」作为下一个 code 的稳定锚点。`ApplyWarning` 同步改为「新增序列未经真机端到端执行」，不再宣称二次确认框未采集。新增序列只做了只读证据链校准，**未再跑 `confirmed=true`**，避免重复不可逆动作。
 
 > 只读诊断 `debug/statecheck` 曾误用 rod 的 `browser.MustClose()`（会发 CDP `Browser.close` 关掉整个调试 Chrome），导致调试浏览器两次「自然退出」；已移除。登录（SSO 扫码）仍必须人工，Hub 不代做。
 
