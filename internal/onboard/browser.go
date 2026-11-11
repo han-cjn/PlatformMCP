@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/proto"
 )
 
 // ErrSelectorMiss 浏览器执行器某步失败(选择器失效/页面结构变化/元素超时),
@@ -268,6 +269,8 @@ func (bx *BrowserExecutor) runOp(op Op, creds map[string]string) error {
 			}
 			el.Timeout(browserClickTimeout).MustClick()
 		})
+	case "clickInRow": // 按行文本定位,再点该行内的动作按钮(见下方方法注释)
+		return bx.clickInRow(op)
 	case "hover": // 飞书 Secret 按钮组是 hover 才展开的(2026-11 实测)
 		return bx.safe(func() {
 			el, err := bx.pick(op)
@@ -391,6 +394,40 @@ func (bx *BrowserExecutor) safe(f func()) (err error) {
 	}()
 	f()
 	return nil
+}
+
+// clickInRow 先在「可见文本命中 op.Match 的行」里定位,再点该行内文本为
+// op.Text 的子元素。用于钉钉 /permission 页:每行 tr[data-row-key] 的文本
+// 含权限点 code 与「立即开通」,若直接对整页按「立即开通」文本匹配,会点到
+// 第一个未开通权限(而不是声明要开的那一个),造成误开通。
+//
+// 行或行内按钮没找到时返回普通错误(编排器降级为 selector_miss 并回传候选),
+// 绝不重试提交、不点其他行、不猜可能出现的二次确认弹窗按钮。
+func (bx *BrowserExecutor) clickInRow(op Op) error {
+	if op.Match == "" || op.Text == "" {
+		return fmt.Errorf("clickInRow 需要 Match(行文本正则)与 Text(行内按钮文本)")
+	}
+	return bx.safe(func() {
+		row, err := bx.page.Timeout(browserOpTimeout).ElementR(op.Target, op.Match)
+		if err != nil {
+			panic(fmt.Errorf("未找到文本匹配 /%s/ 的行 %q: %w", op.Match, op.Target, err))
+		}
+		els, err := row.Elements(rowActionSelector)
+		if err != nil {
+			panic(err)
+		}
+		for _, el := range els {
+			text, e := el.Text()
+			if e != nil || strings.TrimSpace(text) != op.Text {
+				continue
+			}
+			if e := el.Timeout(browserClickTimeout).Click(proto.InputMouseButtonLeft, 1); e != nil {
+				panic(e)
+			}
+			return
+		}
+		panic(fmt.Errorf("行 /%s/ 内未找到按钮 %q(该权限可能已开通,或页面结构已变)", op.Match, op.Text))
+	})
 }
 
 // pick 按选择器取第 Index 个匹配元素(多匹配时跳过前面 N 个)。

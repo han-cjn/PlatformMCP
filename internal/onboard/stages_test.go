@@ -50,11 +50,18 @@ func TestPlatformStagesPerPlatform(t *testing.T) {
 				t.Fatalf("%s/%s 缺 readPage,无法做幂等检测", id, s.ID)
 			}
 			for _, op := range apply {
-				if op.Kind != "click" && op.Kind != "fill" {
+				switch op.Kind {
+				case "click", "fill":
+				case "waitVisible": // 等表单页渲染(钉钉 /version/app_publish/new)
+				case "clickInRow": // 按权限点 code 只点该行的「立即开通」
+				default:
 					t.Fatalf("%s/%s 的 apply 出现越界操作 %s", id, s.ID, op.Kind)
 				}
 				if op.Kind == "click" && op.Match == "" {
 					t.Fatalf("%s/%s 的 apply click 必须按可见文本匹配: %+v", id, s.ID, op)
+				}
+				if op.Kind == "clickInRow" && (op.Match == "" || op.Text == "") {
+					t.Fatalf("%s/%s 的 clickInRow 必须同时声明行正则与行内按钮文本: %+v", id, s.ID, op)
 				}
 			}
 		}
@@ -72,15 +79,17 @@ func TestSetupPlanPerPlatform(t *testing.T) {
 		}
 	}
 	ding := strings.Join(setupPlan(Portals["dingtalk"], "", false), "|")
-	// 2026-11-11 真机 /permission 页的权限点是英文 code,不再是飞书式中文标签。
-	for _, want := range []string{"Contact.User.Read", "AppKey", "AppSecret", "核对版本发布状态", "不自动开通"} {
+	// 2026-11-11 真机 /permission 页的权限点是英文 code;确认门必须写清
+	// 「会自动点哪些权限点」以及「会在企业里留记录」,不能再说只读核对。
+	for _, want := range []string{"Contact.User.Read", "Calendar.Event.Read", "AppKey", "AppSecret",
+		"自动创建新版本并保存", "产生开通记录", "产生版本记录"} {
 		if !strings.Contains(ding, want) {
 			t.Fatalf("钉钉 plan 缺 %q: %s", want, ding)
 		}
 	}
-	for _, bad := range []string{"im:message", "创建版本 1.0.0 并申请发布", "开通权限:", "通讯录只读", "消息推送", "SmartForm"} {
+	for _, bad := range []string{"im:message", "创建版本 1.0.0 并申请发布", "开通权限:", "核对版本发布状态", "不自动开通", "通讯录只读", "消息推送", "SmartForm"} {
 		if strings.Contains(ding, bad) {
-			t.Fatalf("钉钉 plan 不应含 %q(权限/发布已改为只读核对): %s", bad, ding)
+			t.Fatalf("钉钉 plan 仍含旧版只读/推测文案 %q: %s", bad, ding)
 		}
 	}
 	wecom := strings.Join(setupPlan(Portals["wecom"], "", false), "|")

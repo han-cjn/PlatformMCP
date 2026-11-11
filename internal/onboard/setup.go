@@ -18,6 +18,12 @@ type setupStage struct {
 	Action    *BrowserAction
 	Done      func(pageText string) bool
 	ApplyNote string // 非空:probe 后不执行任何 apply,原因如实回传(not_required),避免未校准的不可逆动作
+	// PlanLine 是确认门清单里的平台专属动作描述(声明式,避免编排器按平台硬编码)。
+	// 为空时 setupPlan 回退到通用文案。
+	PlanLine string
+	// ApplyWarning 非空:apply 照常执行,但把未端到端验证的后续动作如实回传
+	// (status=applied_unverified),不伪装成 done。
+	ApplyWarning string
 }
 
 // SetupResult 是 hub.onboard.setup 的返回:把「点进应用 → 创建应用 → 抓凭据 →
@@ -172,8 +178,8 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 		"请调 hub.health 确认 credentials=true / mounted=true。already_done=平台侧原本已完成;" +
 		"api_verified=权限 API 探针已通过、跳过 UI 开通;skipped=未能自动确认、未做任何变更"
 	if len(skipped) > 0 {
-		res.Next += "。注意以下阶段为跳过/只读核对(未自动确认、未产生企业记录): " + strings.Join(skipped, "、") +
-			",详见对应 step.message(status=not_required 表示该平台动作未真机校准,刻意不自动提交),不要用 done 覆盖这些未验证项"
+		res.Next += "。注意以下阶段未完全自动确认: " + strings.Join(skipped, "、") +
+			",详见对应 step.message(not_required=动作未校准、刻意不提交;applied_unverified=表单已提交但发布等后续动作未真机验证,需人工确认),不要用 done 覆盖这些未验证项"
 	}
 	return res, nil
 }
@@ -199,16 +205,32 @@ func setupPlan(p *Portal, appName string, needCreate bool) []string {
 	plan = append(plan, "自动打开应用详情页(无需用户点击)", readLine)
 	stages := platformStages(p)
 	if len(p.Perms) > 0 {
-		label := "开通权限: "
+		// 平台声明了专属清单就用它(钉钉要写清会自动点哪些权限点、会留记录),
+		// 否则回退通用文案,避免编排器里散落 if platform == "dingtalk"。
+		line := ""
 		for _, s := range stages {
-			if s.ID == "enable_perms" && s.ApplyNote != "" {
-				label = "核对权限(只读,不自动开通): "
+			if s.ID == "enable_perms" && s.PlanLine != "" {
+				line = s.PlanLine
+				break
 			}
 		}
-		plan = append(plan, label+strings.Join(p.Perms, ", ")+"(已开通则跳过)")
+		if line == "" {
+			label := "开通权限: "
+			for _, s := range stages {
+				if s.ID == "enable_perms" && s.ApplyNote != "" {
+					label = "核对权限(只读,不自动开通): "
+				}
+			}
+			line = label + strings.Join(p.Perms, ", ") + "(已开通则跳过)"
+		}
+		plan = append(plan, line)
 	}
 	for _, s := range stages {
 		if s.ID != "publish" {
+			continue
+		}
+		if s.PlanLine != "" {
+			plan = append(plan, s.PlanLine)
 			continue
 		}
 		if s.ApplyNote != "" {
@@ -318,7 +340,7 @@ func setupStageOutcomes(steps []SetupStep) (failed, skipped []string) {
 		switch s.Status {
 		case "selector_miss", "browser_missing", "waiting_app_detail", "waiting_login", "page_loading":
 			failed = append(failed, s.ID)
-		case "skipped", "unsupported", "not_required":
+		case "skipped", "unsupported", "not_required", "applied_unverified":
 			skipped = append(skipped, s.ID)
 		}
 	}
@@ -382,6 +404,11 @@ func runSetupStage(stage setupStage, p *Portal, probe *PermProbeResult) (SetupSt
 	}
 	if err := bx.RunAction(&BrowserAction{Script: stage.Action.Script, Ops: apply}, nil); err != nil {
 		return SetupStep{ID: stage.ID, Status: "selector_miss", Message: err.Error()}, collectCandidates(bx)
+	}
+	// apply 执行完但仍有未真机验证的后续动作(如钉钉「保存」后的「发布」):
+	// 如实标 applied_unverified,绝不用 done 掩盖这条边界。
+	if stage.ApplyWarning != "" {
+		return SetupStep{ID: stage.ID, Status: "applied_unverified", Message: stage.ApplyWarning}, nil
 	}
 	return SetupStep{ID: stage.ID, Status: "done"}, nil
 }

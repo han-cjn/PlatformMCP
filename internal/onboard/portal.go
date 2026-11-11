@@ -39,6 +39,10 @@ type Portal struct {
 	LoginHosts []string       // 登录页 host 片段,补充默认的 accounts.* 与 /login
 	AppIDRe    *regexp.Regexp // 从 URL 抽取应用/机器人 ID;nil 用默认 /app/<id>
 	Perms      []string       // 该平台需开通的权限(展示在 plan,也用于页面文本幂等检测)
+	// ApplyPerms 是 apply 阶段真正要去点的权限点。Perms 包含「默认已开通」
+	// 的项(如钉钉 snsapi_base),那些行没有「立即开通」按钮,不能拿来点。
+	// 为空表示该平台没有可安全自动开通的权限点。
+	ApplyPerms []string
 
 	// ---- 应用列表页(2026-11-11 钉钉真机实测) ----
 	// 入口页不渲染应用列表,Agent 若停在入口页就会把「读不到应用链接」误判成
@@ -68,9 +72,9 @@ type BrowserAction struct {
 // 存入凭据收集结果(envKey)。Index 表示多匹配元素取第几个(0 起):飞书
 // Secret 的「显示」按钮是同 class 的第 2 个(第 1 个是复制)。
 type Op struct {
-	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / readPage / extract / fill / screenshot
-	Target      string   // CSS 选择器(支持逗号分隔的多候选)或 URL 前缀(navigate/waitURL)
-	Text        string   // fill 的输入内容;支持 "$env:KEY" 引用已收集凭据
+	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / readPage / extract / fill / screenshot / clickInRow
+	Target      string   // CSS 选择器(支持逗号分隔的多候选)或 URL 前缀(navigate/waitURL);clickInRow 时为「行」选择器
+	Text        string   // fill 的输入内容(支持 "$env:KEY");clickInRow 时为行内要点的按钮文本
 	ExtractKey  string   // readText 抽取到的值存入该 envKey
 	Index       int      // 多匹配时取第几个;0 取首个
 	MaskRune    rune     // readText 识别的掩码字符(0 表示用 defaultMaskRune)
@@ -88,6 +92,11 @@ const defaultMaskRune = '\u2217'
 // 「inspect 候选里明明有『权限管理』、ElementR 却遍历不到该元素」的假超时
 // (2026-11-09 实测踩坑:probe 用 a/li/div/span,候选采集用 button/a/[role=button])。
 const menuCandidateSelector = "a, li, div, span, button, [role=menuitem], [role=button], [role=tab]"
+
+// rowActionSelector 是 clickInRow 在「行」内部查找可点元素的候选标签。
+// 刻意不含 div:钉钉 /permission 行的「立即开通」外层也有一个 div.premium_apply_wrap,
+// 文本同样是「立即开通」,但 React 事件绑在内层 span 上,点 div 不会触发开通。
+const rowActionSelector = "span, button, [role=button], a"
 
 // ---- 格式校验(纯函数,单测覆盖) ----
 
@@ -257,9 +266,12 @@ var Portals = map[string]*Portal{
 		CredPages:  []string{"/fe/ai", "appId=", "/detail", "/baseinfo"},
 		LoginHosts: []string{"login.dingtalk.com", "accounts.dingtalk.com", "oapi.dingtalk.com"},
 		AppIDRe:    regexp.MustCompile(`(?:#/app/|(?:appId|app_id|clientId)=)([A-Za-z0-9_-]{6,})`),
-		// 真机 /permission 页的权限点是英文 code,不是飞书式中文标签。这里只保留
-		// 页面只读比对用的代表性样本;Hub 的 Stream 模式不要求开通这些 API 权限。
-		Perms: []string{"Contact.User.Read", "Calendar.Event.Read", "snsapi_base"},
+		// 真机 /permission 页的权限点是英文 code,不是飞书式中文标签。
+		// Perms 用于只读幂等比对;ApplyPerms 才是 apply 阶段会点的「立即开通」行:
+		// 真机 dump 里 snsapi_base 是「无需审批 已开通 默认开通」,该行没有
+		// 「立即开通」按钮,若把它放进 ApplyPerms 必然 selector_miss。
+		Perms:      []string{"Contact.User.Read", "Calendar.Event.Read", "snsapi_base"},
+		ApplyPerms: []string{"Contact.User.Read", "Calendar.Event.Read"},
 		// 列表页文本特征:「创建应用」按钮 +「全部应用」筛选 +「全部分组」。
 		// 已有应用渲染为 <tr data-row-key><h5 title="应用名">,不是 a[href]。
 		AppListURL:         "https://open-dev.dingtalk.com/fe/app?hash=%23%2Fcorp%2Fapp#/corp/app",

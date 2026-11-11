@@ -1,6 +1,9 @@
 package onboard
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // platformStages 按平台返回「权限 / 发布」的声明式阶段。
 //
@@ -11,11 +14,15 @@ import "strings"
 //   - 各阶段独立执行、独立记状态,单阶段失败不阻断后续阶段。
 //
 // 诚实边界:飞书的 Ops 来自真实后台截图校准;钉钉 2026-11-11 真机实测了
-// /baseinfo /permission /version 三个 tab 的导航、按钮与状态文本(见
-// dingtalk_dom_test.go 的脱敏样本);企微/腾讯文档的后台 DOM 仍未实测,
-// 菜单文本是推测值。dom_verified 只标「创建/权限/发布表单已完整校准」,
-// 钉钉的这些表单未实测故仍为 false,已实测部分由 app_list_verified /
-// tabs_verified 单独标注;失败时由 setup 降级到零 DOM 的 set_credentials。
+// /baseinfo /permission /version 三个 tab 的导航、按钮与状态文本,并只读
+// 打开 /version/app_publish/new 拿到表单字段(input#version / textarea#description
+// /「保存」)与 /permission 行级 DOM(tr[data-row-key] + checkbox + span「立即开通」);
+// 企微/腾讯文档的后台 DOM 仍未实测,菜单文本是推测值。
+//
+// dom_verified 只标「创建/权限/发布表单已端到端校准」:钉钉「保存」后的发布
+// 按钮与「立即开通」后的二次确认框未经真机执行(采集它们等于真提交),创建
+// 应用表单也未打开过,故仍为 false;已实测部分由 app_list_verified /
+// tabs_verified 单独标注,未验证边界由 setupStage.ApplyWarning 如实回传。
 func platformStages(p *Portal) []setupStage {
 	if p == nil {
 		return nil
@@ -82,54 +89,71 @@ func feishuStages() []setupStage {
 	}
 }
 
-// dingtalkStages 按 2026-11-11 真机实测的 /permission 与 /version 页重写。
+// dingtalkStages 按 2026-11-11 真机实测的 /permission、/version 与
+// /version/app_publish/new 表单页重写,并补上受 confirmed 门保护的 apply Ops。
 //
-// 旧版把飞书模板直接套到钉钉:菜单/按钮文本是推测值,幂等检测用
-// 「通讯录只读/消息推送/SmartForm」三个中文标签(真实页面是英文 scope code +
-// 「未开通/立即开通」)。结果 probe 恒判未完成,apply 又在权限页找
-// 「确定/确认/提交/申请」和「创建版本/新建版本」→ 两个 selector_miss。
+// 演进:飞书模板套钉钉 → 两个 selector_miss → ApplyNote(not_required 只读核对)
+// → 本次按真机结构自动提交:
+//   - /permission:行 tr[data-row-key] 文本含英文 code,行内是 span「立即开通」。
+//     先用搜索框按 code 过滤,再 clickInRow 只点该行的按钮,避免误开别的权限。
+//     snsapi_base 真机是「默认开通」,行内没有按钮,只进 Perms 不进 ApplyPerms。
+//   - /version:点「创建新版本」是同标签路由跳到 /version/app_publish/new
+//     表单页(不是弹窗),input#version 已默认填 1.0.1,填描述后点「保存」。
+//     真机核查:点开这个按钮本身没有产生任何版本记录。
 //
-// 现在每个阶段先点自己的 tab 并等页面渲染,再用真实状态文本做幂等检测:
-//   - /version 的版本表格出现「版本状态 + 已上线」= 已发布,already_done;
-//   - /permission 出现「批量申请」且没有「未开通」= 权限齐备,already_done。
-//
-// 未达成时**不声明任何 apply**:钉钉的权限是逐行「立即开通」(实测 23 个
-// 个人权限,多数未开通)、版本按钮是「创建新版本」且其表单未实测,自动提交
-// 会产生多项不可逆的企业记录。用 ApplyNote 如实标注为 not_required,
-// 而不是伪装成 done 或反复 selector_miss。
+// 未采集、因此绝不猜的边界:「立即开通」后的二次确认框、保存后的「发布」
+// 按钮。前者若出现会让下一步 selector_miss 并回传候选元素;后者由
+// ApplyWarning 明确告知「仅生成待发布版本,发布需人工确认」。
 func dingtalkStages() []setupStage {
+	permsOps := []Op{
+		{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*权限管理\s*$`, Scope: "probe"},
+		{Kind: "click", Target: menuCandidateSelector, Match: `^\s*权限管理\s*$`, Scope: "probe"},
+		{Kind: "waitVisible", Target: "body", Match: `批量申请|权限点`, Scope: "probe"},
+		{Kind: "readPage", Scope: "probe"},
+	}
+	for _, code := range Portals["dingtalk"].ApplyPerms {
+		re := regexp.QuoteMeta(code)
+		permsOps = append(permsOps,
+			Op{Kind: "fill", Target: `input[placeholder*="权限或接口"]`, Text: code, Scope: "apply"},
+			Op{Kind: "waitVisible", Target: "tr[data-row-key]", Match: re, Scope: "apply"},
+			Op{Kind: "clickInRow", Target: "tr[data-row-key]", Match: re, Text: "立即开通", Scope: "apply"},
+		)
+	}
 	return []setupStage{
 		{
-			ID: "enable_perms",
-			Action: &BrowserAction{Script: "dingtalk@2026-11-11-perms", Ops: []Op{
-				{Kind: "waitVisible", Target: menuCandidateSelector,
-					Match: `^\s*权限管理\s*$`, Scope: "probe"},
-				{Kind: "click", Target: menuCandidateSelector,
-					Match: `^\s*权限管理\s*$`, Scope: "probe"},
-				{Kind: "waitVisible", Target: "body", Match: `权限点\s*code|批量申请`, Scope: "probe"},
-				{Kind: "readPage", Scope: "probe"},
-			}},
+			ID:     "enable_perms",
+			Action: &BrowserAction{Script: "dingtalk@2026-11-11-perms", Ops: permsOps},
 			Done: func(text string) bool {
-				// 「批量申请」是权限页独有的按钮文本(真机实测),比表头「权限点code」
-				// 更稳:后者可能被 SPA 拆成多个文本节点。
-				return strings.Contains(text, "批量申请") && !strings.Contains(text, "未开通")
+				// 逐 code 检查「无需审批 已开通」,而不是旧版「整页不含『未开通』」:
+				// 后者要求把 23 项个人权限全开通,既不必要也永远满足不了。
+				for _, code := range Portals["dingtalk"].Perms {
+					re := regexp.MustCompile(regexp.QuoteMeta(code) + `\s*无需审批\s*已开通`)
+					if !re.MatchString(text) {
+						return false
+					}
+				}
+				return true
 			},
-			ApplyNote: "钉钉权限页按权限点逐个「立即开通」(实测个人权限 23 项、多数未开通),没有统一的「确定/提交」按钮;Hub 的钉钉能力只依赖 Client ID/Secret + Stream 长连接,不依赖这些 API 权限。逐个自动开通会造成多项不可逆变更,因此只读核对状态、不自动提交;确需开通请在企业后台人工操作",
+			PlanLine: "按权限点 code 自动开通 " + strings.Join(Portals["dingtalk"].ApplyPerms, " / ") +
+				"(已开通则跳过;每项都会在企业内产生开通记录)",
 		},
 		{
 			ID: "publish",
 			Action: &BrowserAction{Script: "dingtalk@2026-11-11-publish", Ops: []Op{
-				{Kind: "waitVisible", Target: menuCandidateSelector,
-					Match: `^\s*版本管理与发布\s*$`, Scope: "probe"},
-				{Kind: "click", Target: menuCandidateSelector,
-					Match: `^\s*版本管理与发布\s*$`, Scope: "probe"},
+				{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*版本管理与发布\s*$`, Scope: "probe"},
+				{Kind: "click", Target: menuCandidateSelector, Match: `^\s*版本管理与发布\s*$`, Scope: "probe"},
 				{Kind: "waitVisible", Target: "body", Match: `版本状态|创建新版本`, Scope: "probe"},
 				{Kind: "readPage", Scope: "probe"},
+				{Kind: "click", Target: menuCandidateSelector, Match: `^\s*创建新版本\s*$`, Scope: "apply"},
+				{Kind: "waitVisible", Target: "input#version", Scope: "apply"},
+				{Kind: "fill", Target: "textarea#description", Text: "mcp-hub 接入自动发布", Scope: "apply"},
+				{Kind: "click", Target: menuCandidateSelector, Match: `^\s*保存\s*$`, Scope: "apply"},
 			}},
 			Done: func(text string) bool {
 				return strings.Contains(text, "版本状态") && strings.Contains(text, "已上线")
 			},
-			ApplyNote: "钉钉版本页按钮是「创建新版本」(不是「创建版本/新建版本」),其表单未真机校准;创建版本并申请发布会在企业里留下记录,故不自动提交。若版本表格里没有已上线版本,请在后台人工创建,或授权进一步实测该表单",
+			PlanLine:     "自动创建新版本并保存(版本号沿用后台默认值如 1.0.1;会在企业内产生版本记录)",
+			ApplyWarning: "「保存」后只生成待发布版本;发布按钮未真机校准(采集它等于真发布),不自动点击。请在后台核对版本内容后再手动发布",
 		},
 	}
 }

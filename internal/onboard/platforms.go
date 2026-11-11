@@ -29,7 +29,7 @@ var platformNames = map[string]string{
 
 var platformHints = map[string]string{
 	"feishu":       "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准",
-	"dingtalk":     "Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab(真机实测);Client Secret 后台只显示掩码,需用户补一次,按 next 用 set_credentials 补齐;权限与版本只读核对状态、不自动提交未校准表单",
+	"dingtalk":     "Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab(真机实测);权限按真机 code 自动「立即开通」、版本表单自动创建并保存,均需 setup(confirmed=true) 显式确认且会在企业内留记录;Client Secret 后台只显示掩码,需用户补一次,按 next 用 set_credentials 补齐;「保存」后的发布按钮未真机校准,不自动点击",
 	"wecom":        "支持 Agent 自动创建智能机器人、抓凭据与启用;后台 DOM 未实测,selector_miss 时降级 set_credentials",
 	"tencent-docs": "授权页即凭据页,Agent 可自动读 Token 并完成接入;无需建应用/开权限/发布,DOM 未实测时降级 set_credentials",
 }
@@ -62,8 +62,9 @@ func SupportedPlatforms(capabilities map[string][]string) []PlatformInfo {
 			// 四个平台都挂了凭据动作,因此 setup 全链路都可用;
 			// dom_verified 如实区分「真实后台校准过」与「按可见文本声明、待实测」。
 			SetupSupported: p != nil && credAction(p) != nil,
-			// dom_verified 只标「创建/权限/发布表单已完整校准」:钉钉虽然实测了
-			// 三个 tab 的导航与幂等文本,但那些表单仍未校准,因此保持 false。
+			// dom_verified 只标「创建/权限/发布表单已端到端校准」:钉钉虽已
+			// 真机拿到权限行与版本表单字段,但创建应用表单没打开过、保存后的
+			// 发布按钮与开通后的二次确认框未经真机执行,因此保持 false。
 			DomVerified:     id == "feishu",
 			AppListVerified: p != nil && p.AppListURL != "" && p.AppListRowSelector != "",
 			TabsVerified:    p != nil && p.CredTab != "" && p.CredTabFragment != "",
