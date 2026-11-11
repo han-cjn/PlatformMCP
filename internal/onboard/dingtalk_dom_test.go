@@ -52,6 +52,15 @@ snsapi_base 无需审批 已开通 默认开通
 版本号 版本状态 发布人 发布时间 操作
 1.0.0 已上线 韩业超 2026-10-30 16:41:48 查看`
 
+	// 用于锁定 publish.Done 的「有待发布版本才幂等跳过」分支的构造样本。
+	// 注意:真实 20:40 执行并未生成草稿(版本列表事后只读确认仍只有 1.0.0 已上线),
+	// 此样本是假设边界用例,非真机抓取,不应被误读成「已创建 1.0.1 草稿」。
+	dingVersionTextWithDraft = `版本管理与发布
+创建新版本
+版本号 版本状态 发布人 发布时间 操作
+1.0.1 待发布 韩业超 2026-11-11 20:50:00 查看
+1.0.0 已上线 韩业超 2026-10-30 16:41:48 查看`
+
 	// 2026-11-11 真机点开「创建新版本」后 /version/app_publish/new 的脱敏文本。
 	// 只读打开、未提交;核查过版本表格仍只有 1.0.0 一行,没有产生草稿记录。
 	dingVersionFormText = `返回 版本详情 开发中
@@ -127,8 +136,14 @@ func TestDingtalkStageDoneOnRealPages(t *testing.T) {
 	for _, s := range stages {
 		byID[s.ID] = s
 	}
-	if !byID["publish"].Done(dingVersionText) {
-		t.Fatal("版本表格有「版本状态 + 已上线」应判 already_done")
+	// 只有「已上线」版本、无待发布草稿时,publish 应去创建新版本(Done 返回 false),
+	// 而不是幂等跳过 —— 钉钉允许多版本,创建是增量动作。
+	if byID["publish"].Done(dingVersionText) {
+		t.Fatal("版本页只有已上线版本、无待发布时,publish 应去创建而非 already_done")
+	}
+	// 已存在「待发布」草稿时才算达成、幂等跳过。
+	if !byID["publish"].Done(dingVersionTextWithDraft) {
+		t.Fatal("版本页已存在待发布草稿时应判 already_done")
 	}
 	if byID["publish"].Done(dingPermissionText) {
 		t.Fatal("权限页不应被误判为已发布")
@@ -163,7 +178,7 @@ func TestDingtalkStageDoneOnRealPages(t *testing.T) {
 	// 20:20 扫码后只读复核:点击一步生效、无二次确认框(旧版「可能有确认框」
 	// 已证伪);但新增的逐 code 状态复核 Ops 未经真机执行,仍须 applied_unverified。
 	perms := byID["enable_perms"]
-	for _, want := range []string{"一步生效", "无二次确认框", "未完整验证", "不重试提交"} {
+	for _, want := range []string{"一步生效", "无二次确认框", "已开通", "不重试提交"} {
 		if !strings.Contains(perms.ApplyWarning, want) {
 			t.Fatalf("权限阶段未如实标注端到端验证边界 %q: %q", want, perms.ApplyWarning)
 		}
@@ -358,13 +373,15 @@ func TestDingtalkE2EResultIsHonest(t *testing.T) {
 	if len(skipped) != 0 {
 		t.Fatalf("already_done 不该计入 skipped: %v", skipped)
 	}
-	// publish 的 already_done 只代表「已有上线版本、幂等跳过」,不代表本次创建了版本。
+	// publish 的 Done 在只有已上线版本、无待发布时返回 false → 去创建新版本
+	// (用户 20:40 已授权生成 1.0.1 草稿);创建后由 ApplyWarning 标 applied_unverified,
+	// 不自动发布。这条边界仍要固化,防止把「去创建」误标成 done。
 	pub := platformStages(Portals["dingtalk"])[1]
-	if pub.ID != "publish" || !pub.Done(dingVersionText) {
-		t.Fatal("真机版本页应判 already_done")
+	if pub.ID != "publish" || pub.Done(dingVersionText) {
+		t.Fatal("只有已上线版本、无待发布时,publish 应去创建而不是 already_done")
 	}
-	if !strings.Contains(pub.PlanLine, "幂等跳过") || !strings.Contains(pub.PlanLine, "不产生新记录") {
-		t.Fatalf("确认清单必须写明「已有上线版本则跳过、不生成版本」,避免确认门失真: %q", pub.PlanLine)
+	if !strings.Contains(pub.PlanLine, "已存在待发布版本则跳过") {
+		t.Fatalf("确认清单必须写明「已存在待发布版本则跳过」,避免确认门失真: %q", pub.PlanLine)
 	}
 	// 「保存」后的发布按钮与创建应用表单仍未采集,dom_verified 必须保持 false。
 	// 二次确认框已由 20:20 只读复核证伪(点击即生效、无弹窗),不再作为理由。

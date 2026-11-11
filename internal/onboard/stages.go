@@ -19,22 +19,29 @@ import (
 // /「保存」)与 /permission 行级 DOM(tr[data-row-key] + checkbox + span「立即开通」);
 // 企微/腾讯文档的后台 DOM 仍未实测,菜单文本是推测值。
 //
-// dom_verified 只标「创建/权限/发布表单已端到端校准」。2026-11-11 19:38
-// 真机跑过一次 setup(dingtalk, confirmed=true):phase=partial,
-//   - enable_perms 跑到第 2 个权限点时 selector_miss(第 5 步 waitVisible
-//     tr[data-row-key] 按 /Calendar.Event.Read/ 未命中)——第 1 个权限点的
-//     「立即开通」已执行;
-//   - publish 因版本页已有 1.0.0 已上线判 already_done,版本表单页没进,
-//     「保存」后的发布按钮未采集,也没生成 1.0.1 草稿。
+// dom_verified 只标「创建/权限/发布表单已端到端校准」。钉钉真机执行史:
+//   - 19:38 第六轮 setup(dingtalk, confirmed=true):phase=partial。
+//     enable_perms 在第 2 个权限点 selector_miss(第 5 步 waitVisible
+//     tr[data-row-key] 按 /Calendar.Event.Read/ 未命中),第 1 个权限点的
+//     「立即开通」已执行;publish 因版本页已有 1.0.0 已上线判 already_done,
+//     版本表单页没进,「保存」后的发布按钮未采集,也没生成 1.0.1 草稿。
+//   - 20:20 第七轮只读复核:Contact.User.Read 已变「已开通 / 移除权限」,页面无
+//     二次确认弹窗 → 「立即开通」一步生效,旧版「可能有确认框」猜测证伪;连续
+//     3 次覆盖式 fill + ElementR 全部命中,证明第 5 步是点击后列表异步刷新的
+//     时序问题(已补逐 code 状态复核与幂等 SkipIfMatch,但新增序列未经端到端执行)。
+//   - 20:40 第八轮 setup(dingtalk, confirmed=true,用户明确授权「执行」):phase=partial。
+//     enable_perms 五个 step 序列跑通(Calendar.Event.Read 的「立即开通」已点),
+//     事后只读快照确认 Calendar.Event.Read 已是「无需审批 已开通 移除权限」⇒
+//     权限副作用**真实生效**(运行时仍保守标 applied_unverified,但 DOM 已证);
+//     publish 五个 step 也跑完、标 applied_unverified,但事后只读快照确认版本列表
+//     仍只有 1.0.0 已上线、**没有 1.0.1 草稿** ⇒ 「保存」并未生成待发布版本。
+//     根因:真机表单版本号字段为空(显示「版本号格式1.0.0」提示),旧版 apply 只
+//     waitVisible(input#version) 却没 fill,「保存」因缺版本号校验失败。已补显式
+//     fill 1.0.1(见 publish Ops),但需再次授权复跑才能验证。
 //
-// 20:20 扫码恢复登录态后只读复核:Contact.User.Read 已变「已开通 / 移除权限」,
-// 页面无二次确认弹窗 → 「立即开通」一步生效,旧版「可能有确认框」的猜测证伪;
-// 连续 3 次覆盖式 fill + ElementR 全部命中,证明第 5 步不是选择器/正则问题,
-// 而是点击后列表异步刷新的时序问题(已补逐 code 状态复核与幂等 SkipIfMatch,
-// 但新增序列未经真机端到端执行)。
-//
-// 「保存」后的发布按钮仍无法只读采集(采集它等于真保存/真发布),创建应用表单
-// 也未打开过,因此 dom_verified 保持 false;已实测部分由 app_list_verified /
+// 「保存」后的「发布」按钮只在存在「待发布」版本时才出现;20:40 既然没生成草稿,
+// 它就仍采集不到(采集它等于真保存/真发布,绝不在未授权时点击)。创建应用表单也未
+// 打开过,因此 dom_verified 仍保持 false;已实测部分由 app_list_verified /
 // tabs_verified 单独标注,未验证边界由 ApplyWarning / PlanLine 如实回传。
 func platformStages(p *Portal) []setupStage {
 	if p == nil {
@@ -111,12 +118,14 @@ func feishuStages() []setupStage {
 //     先用搜索框按 code 过滤,再 clickInRow 只点该行的按钮,避免误开别的权限。
 //     snsapi_base 真机是「默认开通」,行内没有按钮,只进 Perms 不进 ApplyPerms。
 //   - /version:点「创建新版本」是同标签路由跳到 /version/app_publish/new
-//     表单页(不是弹窗),input#version 已默认填 1.0.1,填描述后点「保存」。
-//     真机核查:点开这个按钮本身没有产生任何版本记录。
+//     表单页(不是弹窗),input#version 默认空(显示「版本号格式1.0.0」提示),
+//     需显式填 1.0.1 后点「保存」。真机核查:只读点开这个按钮本身没有产生任何版本记录。
 //
-// 未采集、因此绝不猜的边界只剩「保存」后的「发布」按钮(采集它等于真保存)。
-// 「立即开通」的二次确认框已由只读复核证伪:点击即生效、页面无弹窗。
-// 版本阶段由 ApplyWarning 明确告知「仅生成待发布版本,发布需人工确认」。
+// 「保存」后的「发布」按钮需先有「待发布」版本才出现;20:40 真机执行「保存」未
+// 生成 1.0.1 草稿(版本号字段为空、旧版 apply 未填,已补 fill 1.0.1 待复跑),故
+// 发布按钮仍无法只读采集,绝不猜按钮(采集它等于真保存/真发布)。「立即开通」的
+// 二次确认框已由只读复核证伪:点击即生效、页面无弹窗。版本阶段由 ApplyWarning
+// 明确告知「仅生成待发布版本,发布需人工确认」。
 func dingtalkStages() []setupStage {
 	permsOps := []Op{
 		{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*权限管理\s*$`, Scope: "probe"},
@@ -168,7 +177,7 @@ func dingtalkStages() []setupStage {
 			// selector_miss),本轮新增的逐 code 状态复核 Ops 也未经真机执行,
 			// 因此仍标 applied_unverified:如实说明「新增序列未端到端验证」,
 			// 而不是笼统说无法确认开通状态。
-			ApplyWarning: "真机只读复核:「立即开通」一步生效、页面无二次确认框;但上次端到端只跑通第 1 个权限点(第 2 个 selector_miss),本轮新增的逐 code 状态复核尚未真机执行,故按未完整验证标注,不重试提交。请在后台核对各权限点状态",
+			ApplyWarning: "「立即开通」一步生效、无二次确认框(20:20 只读复核证伪旧猜测);20:40 真机五个 step 已跑通且事后只读快照确认 Calendar.Event.Read 已「无需审批 已开通」,副作用真实生效;但运行时仍保守标 applied_unverified、不重试提交。请在后台核对各权限点状态",
 		},
 		{
 			ID: "publish",
@@ -179,17 +188,30 @@ func dingtalkStages() []setupStage {
 				{Kind: "readPage", Scope: "probe"},
 				{Kind: "click", Target: menuCandidateSelector, Match: `^\s*创建新版本\s*$`, Scope: "apply"},
 				{Kind: "waitVisible", Target: "input#version", Scope: "apply"},
+				// 真机表单版本号字段默认空(显示「版本号格式1.0.0」提示),不填版本号「保存」
+				// 会因校验失败、不生成草稿。20:40 真机执行就栽在这里:apply 只 waitVisible
+				// 了 input#version 却没 fill,事后只读快照确认版本列表仍只有 1.0.0 已上线、
+				// 没有 1.0.1 草稿。补显式填写 1.0.1(仍需再次授权复跑验证)。
+				{Kind: "fill", Target: "input#version", Text: "1.0.1", Scope: "apply"},
 				{Kind: "fill", Target: "textarea#description", Text: "mcp-hub 接入自动发布", Scope: "apply"},
 				{Kind: "click", Target: menuCandidateSelector, Match: `^\s*保存\s*$`, Scope: "apply"},
 			}},
 			Done: func(text string) bool {
-				return strings.Contains(text, "版本状态") && strings.Contains(text, "已上线")
+				// 已存在待发布/未发布/草稿/编辑中/审批中的版本时才算达成,避免重复创建。
+				// 只依赖「已上线」状态做幂等会让 1.0.0 一旦上线、publish 永远跳过、
+				// 永远创建不出新版本(钉钉允许多版本,创建是增量动作,不是重复操作)。
+				// 2026-11-11 20:40 真机:1.0.0 已上线时此处返回 false → 执行 apply 创建 1.0.1 草稿。
+				re := regexp.MustCompile(`待发布|未发布|草稿|编辑中|审批中|待审核|未上线`)
+				return re.MatchString(text)
 			},
-			// 2026-11-11 端到端真机实测:已有 1.0.0 已上线时 Done 判 already_done,
-			// apply 根本不执行,不会生成 1.0.1。旧版清单却承诺「自动创建并保存」,
-			// 用户确认的动作与实际执行不一致 —— 确认门失真,必须如实写清跳过条件。
-			PlanLine:     "检测到已有「已上线」版本则幂等跳过、不产生新记录;仅当没有上线版本时才自动创建新版本并保存(会在企业内产生版本记录)",
-			ApplyWarning: "「保存」后只生成待发布版本;发布按钮未真机校准(采集它等于真发布),不自动点击。请在后台核对版本内容后再手动发布",
+			// 2026-11-11 19:38 端到端真机实测:旧版 Done 检测「版本状态+已上线」,
+			// 1.0.0 已上线时判 already_done、apply 不执行、不会生成 1.0.1;当时把清单
+			// 改为写明「跳过」。但创建新版本是钉钉支持的增量动作(应用可有多版本),
+			// 幂等跳过反而让发布按钮永远拿不到。20:40 用户明确授权生成 1.0.1 草稿后,
+			// 改为按「有待发布版本」做幂等:无待发布版本时执行 apply 创建并保存,
+			// 已存在待发布版本则 already_done 跳过。
+			PlanLine:     "创建新版本并保存(版本号沿用后台默认值如 1.0.1;会在企业内产生版本草稿记录;已存在待发布版本则跳过)",
+			ApplyWarning: "「保存」后只生成待发布版本;20:40 真机执行「保存」未生成 1.0.1 草稿(版本号字段为空、apply 当时未填,已补 fill 1.0.1 待复跑验证),发布按钮未真机校准(采集它等于真发布),不自动点击。请在后台核对版本列表与内容后再手动发布",
 		},
 	}
 }

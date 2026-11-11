@@ -218,6 +218,17 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **扫码恢复登录态后的只读复核与修复**（2026-11-11 第七轮）：SSO 挑战页人工扫码后，用纯只读 DOM 快照（`/tmp/ding-peek-all-20261111.txt`、`/tmp/ding-elementr2-20261111.txt`）拿到三条硬事实：① `Contact.User.Read` 已是「已开通 / 移除权限」，整页无二次确认弹窗 ⇒「立即开通」**一步生效**，旧版「可能有确认框」的猜测证伪；② `Calendar.Event.Read` 仍「未开通」，且连续 3 次覆盖式 `fill` + `ElementR` 全部命中 ⇒ 第 5 步不是选择器/正则问题，而是点击后列表异步刷新让下一次 `fill/waitVisible` 落在过渡态；③ 已上线版本的详情页只有「查看 / 查看版本详情」，没有发布按钮 ⇒ **采集「保存」后的发布按钮只能真保存，无法只读取得**。据此把权限 apply 从每 code 3 步改为 5 步：先等搜索框重新渲染 → 按 code 过滤 → 等行 → `clickInRow` 带 `SkipIfMatch`（已开通的行按钮是「移除权限」，幂等跳过而不是 `selector_miss`）→ 等该行变「已开通」作为下一个 code 的稳定锚点。`ApplyWarning` 同步改为「新增序列未经真机端到端执行」，不再宣称二次确认框未采集。新增序列只做了只读证据链校准，**未再跑 `confirmed=true`**，避免重复不可逆动作。
 
+**用户授权后的二次端到端执行**（2026-11-11 第八轮，`setup(platform="dingtalk", confirmed=true)`，用户明确说「执行」）：留证 `/tmp/setup-true-20261111-v2.json` 与只读快照 `/tmp/ding-snapshot-20261111.txt`，结果 `phase=partial`，**比第六轮更进一步、但仍有诚实偏差**，如实记录：
+
+| 阶段 | 实测 | 说明 |
+|---|---|---|
+| `open_app` | `already_open` | 已有应用详情页，未新建 |
+| `capture` | `incomplete` | `Client Secret` 掩码降级 `set_credentials`（同第六轮） |
+| `enable_perms` | `applied_unverified` | 五个 step 序列**跑通**（不再 `selector_miss`），Calendar.Event.Read 的「立即开通」已点；事后只读快照确认 Calendar.Event.Read 已是「无需审批 已开通 移除权限」⇒ **权限副作用真实生效**（运行时仍保守标 `applied_unverified`） |
+| `publish` | `applied_unverified` | 五个 step 跑完、标 `applied_unverified`，但事后只读快照确认版本列表仍只有 `1.0.0 已上线`、**没有 1.0.1 草稿** ⇒ 「保存」并未生成待发布版本 |
+
+**诚实偏差**：第六轮把 publish 标 `already_done`（没进表单）；第八轮标 `applied_unverified`（apply 执行了）但**仍未生成草稿**。根因是旧版 publish apply 只 `waitVisible(input#version)` 却没 `fill`——真机表单版本号字段默认空（显示「版本号格式1.0.0」提示），缺版本号「保存」会因校验失败而不落草稿。已在 `stages.go` 补显式 `fill input#version = "1.0.1"`，**需再次授权复跑才能验证**；在此之前发布按钮仍无法只读采集，`dom_verified` 继续为 false。权限侧已端到端验证生效，但 `dom_verified` 仅飞书为 true 的口径不变（它要求创建/权限/发布表单全链路校准，钉钉发布表单的「保存→生成草稿」尚未真机验证）。
+
 > 只读诊断 `debug/statecheck` 曾误用 rod 的 `browser.MustClose()`（会发 CDP `Browser.close` 关掉整个调试 Chrome），导致调试浏览器两次「自然退出」；已移除。登录（SSO 扫码）仍必须人工，Hub 不代做。
 
 四平台凭据配置有交互式向导，含真连校验：

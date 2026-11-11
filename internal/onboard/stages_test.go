@@ -82,7 +82,7 @@ func TestSetupPlanPerPlatform(t *testing.T) {
 	// 2026-11-11 真机 /permission 页的权限点是英文 code;确认门必须写清
 	// 「会自动点哪些权限点」以及「会在企业里留记录」,不能再说只读核对。
 	for _, want := range []string{"Contact.User.Read", "Calendar.Event.Read", "AppKey", "AppSecret",
-		"自动创建新版本并保存", "产生开通记录", "产生版本记录"} {
+		"创建新版本并保存", "产生开通记录", "版本草稿记录"} {
 		if !strings.Contains(ding, want) {
 			t.Fatalf("钉钉 plan 缺 %q: %s", want, ding)
 		}
@@ -92,12 +92,12 @@ func TestSetupPlanPerPlatform(t *testing.T) {
 			t.Fatalf("钉钉 plan 仍含旧版只读/推测文案 %q: %s", bad, ding)
 		}
 	}
-	// 2026-11-11 端到端真机(confirmed=true):版本页已有 1.0.0 已上线 → publish
-	// 判 already_done、apply 未执行,没有生成 1.0.1。旧版清单却承诺「自动创建
-	// 并保存、会产生版本记录」,与用户确认的动作不一致。清单必须写明跳过条件。
-	for _, want := range []string{"幂等跳过", "不产生新记录", "仅当没有上线版本"} {
+	// 2026-11-11 端到端真机(confirmed=true):旧版 Done 检测「已上线」让 publish 永远跳过、
+	// 永远创建不出新版本(钉钉允许多版本,创建是增量动作)。20:40 用户授权生成 1.0.1
+	// 草稿,改为按「有待发布版本」幂等:无待发布版本时创建并保存,已存在待发布版本则跳过。
+	for _, want := range []string{"已存在待发布版本则跳过"} {
 		if !strings.Contains(ding, want) {
-			t.Fatalf("钉钉 plan 未如实说明发布幂等跳过条件 %q: %s", want, ding)
+			t.Fatalf("钉钉 plan 未如实说明发布幂等条件 %q: %s", want, ding)
 		}
 	}
 	wecom := strings.Join(setupPlan(Portals["wecom"], "", false), "|")
