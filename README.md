@@ -195,6 +195,8 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **跨平台标签隔离**（2026-11-11 实测）：调试 profile 会长期保留上一次接入的标签。飞书详情页 `open.feishu.cn/app/cli_xxx/baseinfo` 同时含 `/app/` 与 `/baseinfo`，曾命中钉钉的 `CredPages`，导致接入钉钉时 `watch` 误判已进详情页、`start` 提前返回 `ready_to_capture` 且不再打开钉钉页面、`setup` 的 `app_url` 指向飞书。修复后所有 URL 判定先经 `portalPageBelongs` 做域白名单校验（各平台主域 `feishu.cn` / `dingtalk.com` / `weixin.qq.com` / `docs.qq.com`，并合并 `LoginHosts` / `CredPages`），`start` 的提前返回还额外要求 `detail_url` 属于本平台并回传真实停留页面；`openPlatformEntryTab` 对会 302 到独立登录域的入口页按「同平台域内已有标签」幂等并激活到前台，避免重试 `start` 堆积重复标签。
 
+**浏览器执行器同样按平台绑定标签**（2026-11-11 第二轮实测）：`NewBrowserExecutor` 原先取 `MustPages()` 里第一个真实标签，多标签时创建表单 / `inspect` / `readPage` 会跑在上一次接入的飞书页面上，表现为 `selector_miss` 且 candidates 全是飞书元素。现在 `NewBrowserExecutorForPlatform` + `pickPlatformPage` 按「本平台详情页 > 本平台非登录页 > 登录页」选择并激活，找不到该平台标签就直接降级而不是在别的平台页面上执行动作；`inspect` 也不再忽略定位失败去 dump 飞书页面。另：开放平台入口页通常不渲染应用列表（实测钉钉 `?hash=%23%2F#/` 只有 3 个文档链接），「未检测到已有应用」不等于「企业内没有应用」，确认清单已如实标注未验证，避免重复创建不可撤销的应用。
+
 四平台凭据配置有交互式向导，含真连校验：
 
 ```bash

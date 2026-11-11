@@ -47,6 +47,9 @@ func Run(p *Portal, opts Options) error {
 				fmt.Println("⚠️  浏览器执行器不可用,本次向导全部走手动模式:", err)
 			} else {
 				defer bx.Close()
+				// best-effort:优先绑到本平台标签,避免多标签时把动作跑到别的平台;
+				// 失败不阻断,清单里的 navigate 步骤仍会自行打开目标页面。
+				bx.FocusPlatform(p)
 				fmt.Println("✓ 浏览器执行器已连接(支持代填的步骤将自动执行,失败自动降级手动)")
 			}
 		}

@@ -130,28 +130,36 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 	// 确认门:不显式确认就不碰任何按钮。
 	if !confirmed {
 		res.Phase = "need_confirmation"
-		res.Next = "创建应用会在企业里真实产生一个应用且不可撤销。请用选择框让用户确认应用名(默认 \"" +
-			appName + "\"),确认后带 confirmed=true 重新调用 hub.onboard.create_app。" +
+		res.Next = "创建应用会在企业里真实产生一个应用且不可撤销;当前页面未检测到已有应用链接(可能停在入口页),请先确认企业内没有可复用的应用。" +
+			"请用选择框让用户确认应用名(默认 \"" + appName + "\"),确认后带 confirmed=true 重新调用 hub.onboard.create_app。" +
 			"图标沿用平台默认;权限开通与版本发布由 hub.onboard.setup 继续自动完成"
 		return res, nil
 	}
 
 	before := pageSet()
-	bx, err := NewBrowserExecutor("")
+	bx, err := NewBrowserExecutorForPlatform("", p)
 	if err != nil {
 		res.Phase = "browser_missing"
 		res.Message = err.Error()
-		res.Next = "确认 Chrome 以持久化 profile + 9222 调试端口启动(可重跑 hub.onboard.start)"
+		res.Next = "先调用 hub.onboard.start(" + platform + ") 打开目标平台页面并完成登录,再重试;不要在其他平台页面上执行创建动作,也不要重复提交创建表单"
 		return res, nil
 	}
 	defer bx.Close()
 
+	// 只找到登录页标签时,表单必然未命中,别浪费一次有副作用的操作。
+	if cur := bx.CurrentURL(); portalIsLoginPage(p, cur) {
+		res.Phase = "waiting_login"
+		res.Message = "当前只找到 " + p.Title + " 的登录页标签"
+		res.Next = "登录(扫码/验证码)必须人工完成;完成后轮询 hub.onboard.watch,变成 logged_in 再重试。不要自动重试提交表单"
+		return res, nil
+	}
+
 	if err := bx.RunAction(&BrowserAction{Script: act.Script, Ops: createAppOps(act, appName)}, nil); err != nil {
 		res.Phase = "selector_miss"
-		res.Message = err.Error()
+		res.Message = err.Error() + ";执行器绑定页面: " + bx.CurrentURL()
 		res.Candidates = collectCandidates(bx)
-		res.Next = "创建表单的选择器未命中(飞书改版?),已降级为人工,**不要再自动重试提交**。" +
-			"请把 candidates 转述给用户,让他在浏览器里手动创建应用并进入「凭证与基础信息」页,之后调用 hub.onboard.capture"
+		res.Next = "创建表单的选择器未命中(" + p.Title + " 页面改版或 Ops 未校准),已降级,**不要再自动重试提交**。" +
+			"candidates 来自本平台页面,可用于校准 Ops;也可让用户在浏览器里手动创建应用并进入凭证页后调用 hub.onboard.capture,或直接降级 hub.onboard.set_credentials"
 		return res, nil
 	}
 
@@ -223,7 +231,7 @@ func listExistingApps(p *Portal) ([]AppRef, error) {
 	if p.Flow == "token_page" {
 		return []AppRef{}, nil
 	}
-	bx, err := NewBrowserExecutor("")
+	bx, err := NewBrowserExecutorForPlatform("", p)
 	if err != nil {
 		return nil, err
 	}

@@ -277,3 +277,36 @@ func TestOpenPlatformEntryTabIgnoresStaleFeishuTab(t *testing.T) {
 		t.Fatalf("应新开钉钉入口页,请求路径: %v", paths)
 	}
 }
+
+// TestPickPlatformPage 固化浏览器执行器的选标签优先级。
+// 用户报障场景:飞书标签排在前面,执行器必须跳过它们绑定到钉钉标签,
+// 否则创建表单 / inspect / readPage 全跑在飞书页面上。
+func TestPickPlatformPage(t *testing.T) {
+	dingEntry := "https://open-dev.dingtalk.com/?hash=%23%2F#/"
+	dingLogin := "https://login.dingtalk.com/oauth2/challenge.htm?redirect_uri=x"
+	feishuList := "https://open.feishu.cn/app"
+	cases := []struct {
+		name string
+		p    *Portal
+		urls []string
+		want int
+	}{
+		{"飞书标签在前也要选钉钉", Portals["dingtalk"], []string{staleFeishuDetail, feishuList, dingEntry}, 2},
+		{"钉钉标签在前选钉钉", Portals["dingtalk"], []string{dingEntry, staleFeishuDetail, feishuList}, 0},
+		{"详情页优先于入口页", Portals["dingtalk"], []string{dingEntry, dingDetail}, 1},
+		{"详情页优先于登录页", Portals["dingtalk"], []string{dingLogin, dingDetail}, 1},
+		{"域内非登录页优先于登录页", Portals["dingtalk"], []string{dingLogin, dingEntry}, 1},
+		{"只有登录页也可作为兜底", Portals["dingtalk"], []string{staleFeishuDetail, dingLogin}, 1},
+		{"只有飞书标签则无匹配", Portals["dingtalk"], []string{staleFeishuDetail, feishuList}, -1},
+		{"飞书视角忽略钉钉标签", Portals["feishu"], []string{dingDetail, staleFeishuDetail}, 1},
+		{"空列表", Portals["dingtalk"], nil, -1},
+		{"nil portal", nil, []string{dingEntry}, -1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := pickPlatformPage(c.p, c.urls); got != c.want {
+				t.Fatalf("pickPlatformPage=%d,期望 %d (urls=%v)", got, c.want, c.urls)
+			}
+		})
+	}
+}

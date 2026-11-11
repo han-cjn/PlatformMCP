@@ -66,11 +66,11 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 		return res, nil
 	}
 
-	bx, err := NewBrowserExecutor("")
+	bx, err := NewBrowserExecutorForPlatform("", p)
 	if err != nil {
 		res.Phase = "browser_missing"
 		res.Message = err.Error()
-		res.Next = "确认 Chrome 以持久化 profile + 9222 调试端口启动(可重跑 hub.onboard.start)"
+		res.Next = "先调用 hub.onboard.start(" + platform + ") 打开目标平台页面,再重试;不要在其他平台标签上读取凭据"
 		return res, nil
 	}
 	defer bx.Close()

@@ -94,6 +94,61 @@ func NewBrowserExecutor(debugURL string) (*BrowserExecutor, error) {
 	return bx, nil
 }
 
+// NewBrowserExecutorForPlatform 连接调试 Chrome,并把执行器绑定到目标平台的标签。
+//
+// 不能只复用 NewBrowserExecutor 的默认页:它取的是 MustPages() 里第一个真实标签,
+// 顺序由 Chrome 决定。接入钉钉时若还留着飞书标签,创建表单 / inspect / readPage
+// 会全跑在飞书页面上,表现为 selector_miss 且 candidates 是飞书元素。
+// 找不到该平台标签时直接报错,由调用方降级,绝不在别的平台页面上执行动作。
+func NewBrowserExecutorForPlatform(debugURL string, p *Portal) (*BrowserExecutor, error) {
+	bx, err := NewBrowserExecutor(debugURL)
+	if err != nil {
+		return nil, err
+	}
+	if p != nil && !bx.FocusPlatform(p) {
+		bx.Close()
+		return nil, fmt.Errorf("调试 Chrome 里没有 %s 的标签(当前标签可能属于其他平台);先调用 hub.onboard.start 打开目标平台页面", p.Title)
+	}
+	return bx, nil
+}
+
+// FocusPlatform 把执行器绑定到属于目标平台域的标签并切到前台。
+// 优先级由 pickPlatformPage 决定;找不到返回 false,保留 bx.page 不动。
+func (bx *BrowserExecutor) FocusPlatform(p *Portal) bool {
+	if bx == nil || p == nil {
+		return false
+	}
+	found := false
+	_ = bx.safe(func() {
+		pages := bx.browser.MustPages()
+		urls := make([]string, len(pages))
+		for i, pg := range pages {
+			if info, e := pg.Info(); e == nil && info != nil {
+				urls[i] = info.URL
+			}
+		}
+		idx := pickPlatformPage(p, urls)
+		if idx < 0 || idx >= len(pages) {
+			return
+		}
+		bx.page = pages[idx]
+		found = true
+		_, _ = pages[idx].Activate()
+	})
+	return found
+}
+
+// CurrentURL 只读返回执行器当前绑定标签的 URL,供调用方确认没跑错平台。
+func (bx *BrowserExecutor) CurrentURL() string {
+	var raw string
+	_ = bx.safe(func() {
+		if info, e := bx.page.Info(); e == nil && info != nil {
+			raw = info.URL
+		}
+	})
+	return raw
+}
+
 // chromeDebugStartHint 指引用户用持久化 profile 重启 Chrome 的命令模板。
 const chromeDebugStartHint = `请用持久化 profile 重启 Chrome,否则登录态会丢:
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \

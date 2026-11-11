@@ -185,7 +185,7 @@ func setupPlan(p *Portal, appName string, needCreate bool) []string {
 		return append(plan, "自动打开凭据授权页(无需用户点击)", readLine)
 	}
 	if needCreate {
-		plan = append(plan, "创建应用「"+appName+"」(企业内真实产生且不可撤销)")
+		plan = append(plan, "创建应用「"+appName+"」(企业内真实产生且不可撤销;当前页面未检测到已有应用,请先核对避免重复创建)")
 	}
 	plan = append(plan, "自动打开应用详情页(无需用户点击)", readLine)
 	if len(p.Perms) > 0 {
@@ -221,7 +221,10 @@ func openAppForSetup(p *Portal, w *WatchResult) (string, SetupStep) {
 		return "", SetupStep{ID: "open_app", Status: "browser_missing", Message: err.Error()}
 	}
 	if len(apps) == 0 {
-		return "", SetupStep{ID: "open_app", Status: "need_create_app", Message: "应用列表为空,需创建应用"}
+		// 入口页(如钉钉 ?hash=%23%2F#/)不渲染应用列表,读不到链接不等于
+		// 企业里没有应用。如实标注「未检测到」,别让确认框把未验证当既定事实。
+		return "", SetupStep{ID: "open_app", Status: "need_create_app",
+			Message: "当前页面未检测到已有应用链接(可能停在开放平台入口页),无法确认企业内是否已有应用;创建应用不可撤销,请先核对"}
 	}
 	target := absoluteAppURL(p, apps[0].URL)
 	if !openDebugTab(target) {
@@ -317,7 +320,7 @@ func runSetupStage(stage setupStage, p *Portal, probe *PermProbeResult) (SetupSt
 			// 平台明确报权限不足,继续走 UI 开通流程
 		}
 	}
-	bx, err := NewBrowserExecutor("")
+	bx, err := NewBrowserExecutorForPlatform("", p)
 	if err != nil {
 		return SetupStep{ID: stage.ID, Status: "browser_missing", Message: err.Error()}, nil
 	}
@@ -378,19 +381,22 @@ func Inspect(platform string) (*InspectResult, error) {
 		res.Next = "调试 Chrome 未就绪;先调用 hub.onboard.start"
 		return res, nil
 	}
-	bx, err := NewBrowserExecutor("")
+	bx, err := NewBrowserExecutorForPlatform("", p)
 	if err != nil {
-		res.Next = "连接调试 Chrome 失败: " + err.Error()
+		res.Next = "未找到 " + p.Title + " 的标签(当前标签可能属于其他平台): " + err.Error() +
+			";先调用 hub.onboard.start 打开目标平台页面,再重试 inspect"
 		return res, nil
 	}
 	defer bx.Close()
 
-	focusDetailPage(bx, p)
-	_ = bx.safe(func() {
-		if info, e := bx.page.Info(); e == nil && info != nil {
-			res.URL = info.URL
-		}
-	})
+	// 旧版忽略 focusDetailPage 的返回值,详情页不存在时会把「第一个真实标签」
+	// (常常是上一次接入留下的飞书页)当成目标平台页面 dump 出来,误导 Agent。
+	inDetail := focusDetailPage(bx, p)
+	if !inDetail && !bx.FocusPlatform(p) {
+		res.Next = "未找到 " + p.Title + " 的标签;先调用 hub.onboard.start 打开目标平台页面"
+		return res, nil
+	}
+	res.URL = bx.CurrentURL()
 	res.Candidates = collectCandidates(bx)
 	_ = bx.safe(func() {
 		el := bx.page.Timeout(browserOpTimeout).MustElement("body")
@@ -399,6 +405,11 @@ func Inspect(platform string) (*InspectResult, error) {
 	if len(res.PageText) > 3000 {
 		res.PageText = res.PageText[:3000] + "...(已截断)"
 	}
-	res.Next = "用 candidates 里的按钮文本 / 输入框 placeholder 校准 setup 阶段 Ops;此工具只读,不改变页面"
+	if inDetail {
+		res.Next = "用 candidates 里的按钮文本 / 输入框 placeholder 校准 setup 阶段 Ops;此工具只读,不改变页面"
+	} else {
+		res.Next = "当前停在 " + p.Title + " 的入口/列表页(非应用详情页);candidates 来自本平台页面,不是其他平台标签。" +
+			"如需校准详情页 Ops,先让 setup 打开应用详情页再重试;此工具只读,不改变页面"
+	}
 	return res, nil
 }
