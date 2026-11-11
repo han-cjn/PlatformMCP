@@ -188,7 +188,7 @@
 **何时用**：
 - 确认哪些平台可用
 
-**`hub.report.run`** - 手动触发日报
+**`hub.report.run`** - 手动触发日报(**条件注册工具,不是常驻工具**)
 
 ```json
 {
@@ -196,8 +196,11 @@
 }
 ```
 
+**前提条件**：`.env` 必须配置 `BITABLE_APP_TOKEN`（同时需要 `BITABLE_TABLE_ID`、`TENCENT_DOCS_TOKEN` 与至少一个推送目标群）。该变量为空时 Hub **根本不会注册这个工具**，`tools/list` 里不会出现；CLI 的 `-run-report` 同样会直接报错退出。
+
 **何时用**：
 - 用户说"生成今天的日报"、"补跑昨天的日报"
+- **调用前先确认工具清单里有 `hub.report.run`**（可用 `hub.tools` 查看）；没有就如实说明"日报链路未启用，需先配置 BITABLE_APP_TOKEN"，不要假装调用成功，也不要去调不存在的工具
 
 ---
 
@@ -465,7 +468,7 @@
 | 更新记录 | `table.update` | `platform`, `app`, `table`, `records` |
 | 查群聊 | `hub.chats` | - |
 | 查健康 | `hub.health` | - |
-| 触发日报 | `hub.report.run` | `date?` |
+| 触发日报 | `hub.report.run`（需 `BITABLE_APP_TOKEN`，未配置时不注册） | `date?` |
 
 ---
 

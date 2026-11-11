@@ -255,7 +255,8 @@ scripts/            工具脚本(Chrome 调试启动器)
 ## 测试
 
 ```bash
-go test ./...          # 全量测试(84 项)
+go test ./...                 # 全量测试
+go test ./... -list '^Test'   # 列出全部测试用例(数量随版本变化,不写死)
 go test ./internal/semantic/ -v  # 语义层详细输出
 ```
 

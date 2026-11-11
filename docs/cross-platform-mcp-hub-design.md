@@ -259,6 +259,6 @@ Hub 启动时注入 lark-mcp 子进程,即完成接入。
 
 **.env 需要**:BITABLE_APP_TOKEN / BITABLE_TABLE_ID(数据源)、TENCENT_DOCS_TOKEN(建文档)、`WECOM_CHAT_ID` 等推送目标群。
 
-**手动触发 / 补跑**:`./hub -run-report [-report-date YYYY-MM-DD]`,或 MCP 元工具 `hub.report.run`(可选 `date` 参数)。
+**手动触发 / 补跑**:`./hub -run-report [-report-date YYYY-MM-DD]`,或 MCP 元工具 `hub.report.run`(可选 `date` 参数)。两者都依赖上述 `BITABLE_APP_TOKEN`:该变量为空时 `hub.report.run` 不会注册、`tools/list` 里没有它,CLI 也会直接报错退出。
 
 **行为约定**:无新增记录 → 不生成空日报、不推送,审计留 `skipped`;同日重复触发 → 更新同一篇文档(远程腾讯文档 MCP 无整篇覆写 API,实现为「同 file_id 顶部插入最新快照」,链接不变);429/配额类错误分类为 `limit` 不重试,其余 transient 错误最多重试 2 次。
