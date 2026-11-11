@@ -81,8 +81,11 @@ func TestPortalDetailMatchPerPlatform(t *testing.T) {
 		{"feishu", "https://open.feishu.cn/app/create", false},
 		{"feishu", "https://accounts.feishu.cn/accounts/page/login", false},
 		{"dingtalk", "https://open-dev.dingtalk.com/", false},
-		{"dingtalk", "https://open-dev.dingtalk.com/fe/app?appId=dingabc123", true},
-		{"dingtalk", "https://open-dev.dingtalk.com/fe/app/cli_xxx/baseinfo", true},
+		// 2026-11-11 真机实测:/fe/app 是应用列表页,/fe/ai?...#/app/<uuid>/dev
+		// 才是应用详情页。旧用例把推测的 /fe/app?appId= 当详情页,会掩盖串页。
+		{"dingtalk", dingAppList, false},
+		{"dingtalk", dingDetail, true},
+		{"dingtalk", "https://open-dev.dingtalk.com/fe/ai?appId=dingabc123", true},
 		{"wecom", "https://work.weixin.qq.com/", false},
 		{"wecom", "https://work.weixin.qq.com/ai/robot?botid=bot123456", true},
 		{"tencent-docs", "https://docs.qq.com/open/auth/mcp.html", true},
@@ -125,7 +128,8 @@ func TestClassifyPagesOtherPlatforms(t *testing.T) {
 	}{
 		{"dingtalk", []string{"https://login.dingtalk.com/"}, "waiting_login", false},
 		{"dingtalk", []string{"https://open-dev.dingtalk.com/"}, "logged_in", false},
-		{"dingtalk", []string{"https://open-dev.dingtalk.com/fe/app?appId=dingabc123"}, "logged_in", true},
+		{"dingtalk", []string{dingAppList}, "logged_in", false},
+		{"dingtalk", []string{dingDetail}, "logged_in", true},
 		{"wecom", []string{"https://login.work.weixin.qq.com/wwlogin"}, "waiting_login", false},
 		{"wecom", []string{"https://work.weixin.qq.com/ai/robot?botid=bot123456"}, "logged_in", true},
 		{"tencent-docs", []string{"https://docs.qq.com/open/auth/mcp.html"}, "logged_in", true},
@@ -142,7 +146,7 @@ func TestClassifyPagesOtherPlatforms(t *testing.T) {
 func TestPortalAppID(t *testing.T) {
 	cases := []struct{ platform, url, want string }{
 		{"feishu", "https://open.feishu.cn/app/cli_abc123/baseinfo", "cli_abc123"},
-		{"dingtalk", "https://open-dev.dingtalk.com/fe/app?appId=dingabc123", "dingabc123"},
+		{"dingtalk", dingDetail, "1f2e47b9-a105-48f6-9cdc-45b32563a88e"},
 		{"wecom", "https://work.weixin.qq.com/ai/robot?botid=bot123456", "bot123456"},
 	}
 	for _, c := range cases {

@@ -92,8 +92,16 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 		res.Next = "自动打开应用详情页失败:" + st.Message + ";可重跑 hub.onboard.start 后重试"
 		return res, nil
 	}
+	if st.Status == "page_loading" {
+		// 列表页还没渲染完时,既不能断定「有应用」也不能断定「没有应用」;
+		// 直接返回,不生成含「创建应用」的确认清单,避免用户误点不可撤销动作。
+		res.Phase = "page_loading"
+		res.Next = st.Message + ";请等待 1~2 秒后重试 hub.onboard.setup(confirmed=false),不要确认创建应用,也不要让用户切终端"
+		return res, nil
+	}
 
-	// 只有清单里声明了 create-* 动作的平台才能代建应用;token_page 无需创建。
+	// 只有「已确认应用列表页渲染完成且确实没有应用」才允许代建;
+	// 另外还要求清单里声明了 create-* 动作,token_page 无需创建。
 	needCreate := st.Status == "need_create_app" && createAppAction(p) != nil
 	if !confirmed {
 		res.Phase = "need_confirmation"
@@ -216,15 +224,29 @@ func openAppForSetup(p *Portal, w *WatchResult) (string, SetupStep) {
 	if w.InAppDetail && w.DetailURL != "" {
 		return w.DetailURL, SetupStep{ID: "open_app", Status: "already_open"}
 	}
-	apps, err := listExistingApps(p)
+	apps, listVerified, err := listExistingApps(p)
 	if err != nil {
 		return "", SetupStep{ID: "open_app", Status: "browser_missing", Message: err.Error()}
 	}
 	if len(apps) == 0 {
-		// 入口页(如钉钉 ?hash=%23%2F#/)不渲染应用列表,读不到链接不等于
-		// 企业里没有应用。如实标注「未检测到」,别让确认框把未验证当既定事实。
-		return "", SetupStep{ID: "open_app", Status: "need_create_app",
-			Message: "当前页面未检测到已有应用链接(可能停在开放平台入口页),无法确认企业内是否已有应用;创建应用不可撤销,请先核对"}
+		if listVerified {
+			return "", SetupStep{ID: "open_app", Status: "need_create_app",
+				Message: "已自动进入应用列表页并确认页面渲染完成,未发现已有应用"}
+		}
+		// 入口页/加载中的列表页读不到应用,不等于企业里没有应用。
+		// 这是硬闸门:未确认列表页渲染完成就绝不进入创建流程(创建不可撤销)。
+		return "", SetupStep{ID: "open_app", Status: "page_loading",
+			Message: "已自动进入应用列表页,但页面尚未渲染完成(未在页面上读到列表特征);此时不能判断企业内是否已有应用"}
+	}
+	if apps[0].NeedsClick {
+		// 钉钉列表页的应用是 <tr data-row-key><h5 title="应用名">,没有 href。
+		// 点击行只是导航到详情页,不提交任何表单、不创建任何东西。
+		if detail, ok := clickAppRow(p); ok {
+			return detail, SetupStep{ID: "open_app", Status: "done",
+				Message: "已自动进入应用列表页,并点击进入已有应用「" + apps[0].Name + "」的详情页(未新建应用)"}
+		}
+		return "", SetupStep{ID: "open_app", Status: "selector_miss",
+			Message: "已自动进入应用列表页并检测到已有应用「" + apps[0].Name + "」,但点击进入详情失败(行选择器未命中);请在浏览器点进该应用后重试,不要创建重复应用"}
 	}
 	target := absoluteAppURL(p, apps[0].URL)
 	if !openDebugTab(target) {

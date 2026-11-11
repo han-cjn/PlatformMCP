@@ -16,9 +16,12 @@ import (
 
 const (
 	staleFeishuDetail = "https://open.feishu.cn/app/cli_aa6ee0lec8b85bf6/baseinfo"
-	dingDetail        = "https://open-dev.dingtalk.com/fe/app?appId=dingabc123"
-	wecomDetail       = "https://work.weixin.qq.com/ai/robot?botid=bot123456"
-	qqAuthPage        = "https://docs.qq.com/open/auth/mcp.html"
+	// 2026-11-11 真机实测:钉钉详情页是 /fe/ai?...#/app/<uuid>/dev,
+	// /fe/app 是应用列表页(不是详情页),旧常量把两者混为一谈。
+	dingDetail  = "https://open-dev.dingtalk.com/fe/ai?hash=%23%2Fapp%2F1f2e47b9-a105-48f6-9cdc-45b32563a88e%2Fdev#/app/1f2e47b9-a105-48f6-9cdc-45b32563a88e/dev"
+	dingAppList = "https://open-dev.dingtalk.com/fe/app?hash=%23%2Fcorp%2Fapp#/corp/app"
+	wecomDetail = "https://work.weixin.qq.com/ai/robot?botid=bot123456"
+	qqAuthPage  = "https://docs.qq.com/open/auth/mcp.html"
 )
 
 func TestPortalDetailMatchRejectsCrossPlatformTabs(t *testing.T) {

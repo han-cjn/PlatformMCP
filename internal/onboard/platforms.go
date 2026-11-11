@@ -5,16 +5,18 @@ import "sort"
 // PlatformInfo 是项目支持的单个平台的展示信息,供 Agent 在接入选择框里全量列出。
 // Capabilities 由调用方从语义层能力矩阵注入,避免 onboard 反向依赖 semantic。
 type PlatformInfo struct {
-	ID             string      `json:"id"`
-	Name           string      `json:"name"`
-	Title          string      `json:"title"`
-	Credentials    string      `json:"credentials"` // configured / missing
-	SetupSupported bool        `json:"setup_supported"`
-	BrowserCapture bool        `json:"browser_capture"`
-	DomVerified    bool        `json:"dom_verified"` // 声明式 Ops 是否在真实后台 DOM 上校准过
-	Capabilities   []string    `json:"capabilities"`
-	CredentialKeys []CredField `json:"credential_fields"`
-	Hint           string      `json:"hint,omitempty"`
+	ID              string      `json:"id"`
+	Name            string      `json:"name"`
+	Title           string      `json:"title"`
+	Credentials     string      `json:"credentials"` // configured / missing
+	SetupSupported  bool        `json:"setup_supported"`
+	BrowserCapture  bool        `json:"browser_capture"`
+	DomVerified     bool        `json:"dom_verified"`      // 创建/权限/发布 Ops 是否在真实后台 DOM 上完整校准过
+	AppListVerified bool        `json:"app_list_verified"` // 应用列表页 URL/行选择器是否真机实测过
+	AppListURL      string      `json:"app_list_url,omitempty"`
+	Capabilities    []string    `json:"capabilities"`
+	CredentialKeys  []CredField `json:"credential_fields"`
+	Hint            string      `json:"hint,omitempty"`
 }
 
 var platformNames = map[string]string{
@@ -26,7 +28,7 @@ var platformNames = map[string]string{
 
 var platformHints = map[string]string{
 	"feishu":       "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准",
-	"dingtalk":     "支持 Agent 自动创建应用、抓凭据、开权限与发布;后台 DOM 未实测,selector_miss 时降级 set_credentials",
+	"dingtalk":     "Agent 自动进入应用列表页(真机实测)并点进已有应用;创建/权限/发布表单未实测,selector_miss 时降级 set_credentials",
 	"wecom":        "支持 Agent 自动创建智能机器人、抓凭据与启用;后台 DOM 未实测,selector_miss 时降级 set_credentials",
 	"tencent-docs": "授权页即凭据页,Agent 可自动读 Token 并完成接入;无需建应用/开权限/发布,DOM 未实测时降级 set_credentials",
 }
@@ -45,9 +47,11 @@ func SupportedPlatforms(capabilities map[string][]string) []PlatformInfo {
 		}
 		caps := append([]string(nil), capabilities[id]...)
 		sort.Strings(caps)
-		var title string
-		if p := Portals[id]; p != nil {
+		p := Portals[id]
+		var title, listURL string
+		if p != nil {
 			title = p.Title
+			listURL = p.AppListURL
 		}
 		out = append(out, PlatformInfo{
 			ID:          id,
@@ -56,12 +60,14 @@ func SupportedPlatforms(capabilities map[string][]string) []PlatformInfo {
 			Credentials: state,
 			// 四个平台都挂了凭据动作,因此 setup 全链路都可用;
 			// dom_verified 如实区分「真实后台校准过」与「按可见文本声明、待实测」。
-			SetupSupported: Portals[id] != nil && credAction(Portals[id]) != nil,
-			DomVerified:    id == "feishu",
-			BrowserCapture: Portals[id] != nil && credAction(Portals[id]) != nil,
-			Capabilities:   caps,
-			CredentialKeys: CredentialFields(id),
-			Hint:           platformHints[id],
+			SetupSupported:  p != nil && credAction(p) != nil,
+			DomVerified:     id == "feishu",
+			AppListVerified: p != nil && p.AppListURL != "" && p.AppListRowSelector != "",
+			AppListURL:      listURL,
+			BrowserCapture:  p != nil && credAction(p) != nil,
+			Capabilities:    caps,
+			CredentialKeys:  CredentialFields(id),
+			Hint:            platformHints[id],
 		})
 	}
 	return out

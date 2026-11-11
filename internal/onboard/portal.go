@@ -39,6 +39,16 @@ type Portal struct {
 	LoginHosts []string       // 登录页 host 片段,补充默认的 accounts.* 与 /login
 	AppIDRe    *regexp.Regexp // 从 URL 抽取应用/机器人 ID;nil 用默认 /app/<id>
 	Perms      []string       // 该平台需开通的权限(展示在 plan,也用于页面文本幂等检测)
+
+	// ---- 应用列表页(2026-11-11 钉钉真机实测) ----
+	// 入口页不渲染应用列表,Agent 若停在入口页就会把「读不到应用链接」误判成
+	// 「企业里没有应用」,进而在确认框里提出创建不可撤销的新应用。因此把
+	// 「如何自动进入应用列表页」也做成声明式配置,由 start/setup 统一调用。
+	// AppListURL 必须是实测可直达、且登录态在同一持久化 profile 内保留的 URL;
+	// 为空表示该平台没有独立列表页(或尚未实测),不做任何自动导航。
+	AppListURL         string   // 应用列表页 URL
+	AppListMarkers     []string // 列表页可见文本特征,用于确认页面已渲染
+	AppListRowSelector string   // 列表页已有应用的可点击元素(每行一个),读到即证明已有应用
 }
 
 // BrowserAction 浏览器执行器动作序列;Script 为选择器版本标记(平台改版只改数据)。
@@ -192,9 +202,14 @@ var Portals = map[string]*Portal{
 				"左侧「机器人配置」:消息接收模式选 Stream 模式(免公网)",
 			}, Browser: &BrowserAction{
 				Script: "dingtalk@2026-11-create",
+				// 2026-11-11 真机实测:列表页 /fe/app?...#/corp/app 的按钮文本是
+				// 「创建应用」(BUTTON);入口页的「创建快捷应用」是另一种智能体应用,
+				// 宣传卡片的「立即创建」也不是企业内部应用,两者都不能误点。
+				// 下面的填表/提交 Ops 尚未真机校准(创建表单未打开过),命中失败即
+				// selector_miss 降级,绝不重试提交。
 				Ops: []Op{
-					{Kind: "waitVisible", Target: menuCandidateSelector, Match: "^\\s*(创建应用|创建企业内部应用|立即创建)\\s*$"},
-					{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(创建应用|创建企业内部应用|立即创建)\\s*$"},
+					{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*创建应用\s*$`},
+					{Kind: "click", Target: menuCandidateSelector, Match: `^\s*创建应用\s*$`},
 					{Kind: "fill", Target: "input[placeholder*='名称'], [role=dialog] input[type=text], input[type=text]", Text: "$app_name"},
 					{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(确定|确认|提交|创建)\\s*$"},
 				},
@@ -216,12 +231,23 @@ var Portals = map[string]*Portal{
 					},
 				}},
 		},
-		Flow:       "app_console",
-		CredPages:  []string{"/app/", "appId=", "/detail", "/baseinfo"},
+		Flow: "app_console",
+		// 2026-11-11 真机实测的三段 URL:
+		//   入口页 https://open-dev.dingtalk.com/?hash=%23%2F#/
+		//   列表页 https://open-dev.dingtalk.com/fe/app?hash=%23%2Fcorp%2Fapp#/corp/app
+		//   详情页 https://open-dev.dingtalk.com/fe/ai?...#/app/<uuid>/dev
+		// 旧的 CredPages 里宽泛的 "/app/" 会把别的平台详情页串进来,改用实测
+		// 的 /fe/ai 前缀 + #/app/<id> 由 AppIDRe 精确识别。
+		CredPages:  []string{"/fe/ai", "appId=", "/detail", "/baseinfo"},
 		LoginHosts: []string{"login.dingtalk.com", "accounts.dingtalk.com", "oapi.dingtalk.com"},
-		AppIDRe:    regexp.MustCompile(`(?:appId|app_id|clientId)=([A-Za-z0-9_-]{6,})`),
+		AppIDRe:    regexp.MustCompile(`(?:#/app/|(?:appId|app_id|clientId)=)([A-Za-z0-9_-]{6,})`),
 		Perms:      []string{"通讯录只读", "消息推送", "SmartForm"},
-		Validate:   ValidateDingTalk,
+		// 列表页文本特征:「创建应用」按钮 +「全部应用」筛选 +「全部分组」。
+		// 已有应用渲染为 <tr data-row-key><h5 title="应用名">,不是 a[href]。
+		AppListURL:         "https://open-dev.dingtalk.com/fe/app?hash=%23%2Fcorp%2Fapp#/corp/app",
+		AppListMarkers:     []string{"创建应用", "全部应用", "全部分组"},
+		AppListRowSelector: "tr[data-row-key] h5[title]",
+		Validate:           ValidateDingTalk,
 	},
 	"wecom": {
 		Name:  "wecom",

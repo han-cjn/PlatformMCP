@@ -36,10 +36,14 @@ var appPathExcludes = map[string]bool{
 }
 
 // AppRef 描述一个已存在的应用。
+// NeedsClick=true 表示它来自应用列表页的行元素(不是 a[href]),URL 是列表页
+// 地址,需要点击该行才会进入详情页;调用方据此走 clickAppRow,不要把它当成
+// 详情页直接打开,也不要误判成「企业里没有应用」。
 type AppRef struct {
-	AppID string `json:"app_id,omitempty"`
-	Name  string `json:"name,omitempty"`
-	URL   string `json:"url"`
+	AppID      string `json:"app_id,omitempty"`
+	Name       string `json:"name,omitempty"`
+	URL        string `json:"url"`
+	NeedsClick bool   `json:"needs_click,omitempty"`
 }
 
 // CreateAppResult 是 hub.onboard.create_app 的返回。
@@ -111,7 +115,7 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 	}
 
 	// 幂等门 2:列表页已经有应用卡片 → 复用,不新建。
-	apps, err := listExistingApps(p)
+	apps, _, err := listExistingApps(p)
 	if err != nil {
 		res.Phase = "browser_missing"
 		res.Message = err.Error()
@@ -223,21 +227,30 @@ func createAppOps(act *BrowserAction, appName string) []Op {
 	return ops
 }
 
-// listExistingApps 只读地收集列表页上已存在的应用链接,用于幂等判断。
-// 依据是详情页 URL 中的 /app/<appId> 模式(与 watch.classifyPages 同源),
-// 不依赖任何易变的 class。
-func listExistingApps(p *Portal) ([]AppRef, error) {
+// listExistingApps 只读地收集已存在的应用,用于幂等判断。
+//
+// listVerified 表示「已确认停在应用列表页且页面文本特征全部渲染」——只有它为
+// true 且结果为 0,才能如实说「企业里没有应用」。停在入口页/页面加载中时返回
+// false,调用方必须按「未检测到」处理,不能据此创建不可撤销的新应用。
+//
+// 两类证据:详情页 URL(飞书 /app/<appId>)与列表页行元素(钉钉 tr[data-row-key]
+// h5[title],不是链接)。后者由 Portal 声明式提供,不散落平台 if。
+func listExistingApps(p *Portal) (apps []AppRef, listVerified bool, err error) {
 	// token_page 平台没有「应用列表」概念,Setup 会直接打开授权页读凭据。
 	if p.Flow == "token_page" {
-		return []AppRef{}, nil
+		return []AppRef{}, false, nil
+	}
+	// 自动进入应用列表页(幂等):入口页不渲染应用列表,不进列表页就会误判。
+	if p.AppListURL != "" {
+		ensureAppListTab(p)
 	}
 	bx, err := NewBrowserExecutorForPlatform("", p)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer bx.Close()
 
-	var out []AppRef
+	out := []AppRef{}
 	seen := map[string]bool{}
 	add := func(raw, name string) {
 		id := portalAppID(p, raw)
@@ -261,6 +274,56 @@ func listExistingApps(p *Portal) ([]AppRef, error) {
 			if hostOf(info.URL) != hostOf(p.URL) {
 				continue
 			}
+			// 应用列表页:确认 markers 渲染后读出行元素(钉钉实测)。
+			// SPA 刚打开时只有「加载中」,此时读不到行,不能当成「没有应用」;
+			// 短轮询等它渲染完(连续 start→setup 的实测场景)。
+			if isAppListPage(p, info.URL) {
+				rendered := false
+				for attempt := 0; attempt < 5; attempt++ {
+					var text string
+					if el, e := pg.Timeout(browserOpTimeout).Element("body"); e == nil {
+						text, _ = el.Timeout(browserOpTimeout).Text()
+					}
+					rendered = len(p.AppListMarkers) > 0
+					for _, marker := range p.AppListMarkers {
+						if !strings.Contains(text, marker) {
+							rendered = false
+						}
+					}
+					if rendered {
+						break
+					}
+					time.Sleep(500 * time.Millisecond)
+				}
+				if rendered {
+					listVerified = true
+				}
+				if rendered && p.AppListRowSelector != "" {
+					els, e := pg.Elements(p.AppListRowSelector)
+					if e == nil {
+						for i, el := range els {
+							name := ""
+							if t, e := el.Text(); e == nil {
+								name = strings.TrimSpace(t)
+							}
+							if name == "" {
+								continue
+							}
+							key := "row:" + name
+							if seen[key] {
+								continue
+							}
+							seen[key] = true
+							out = append(out, AppRef{
+								AppID:      fmt.Sprintf("row-%d", i+1),
+								Name:       name,
+								URL:        info.URL,
+								NeedsClick: true,
+							})
+						}
+					}
+				}
+			}
 			els, e := pg.Elements("a[href]")
 			if e != nil {
 				continue
@@ -278,9 +341,9 @@ func listExistingApps(p *Portal) ([]AppRef, error) {
 		}
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return out, nil
+	return out, listVerified, nil
 }
 
 // collectCandidates 失败时 dump 页面上可见的按钮文本与输入框 placeholder,

@@ -91,10 +91,27 @@ func StartPlatform(platform string) (*StartResult, error) {
 		case w.LoginState == "logged_in":
 			res.Phase = "logged_in"
 			res.ManualSteps = []string{} // 点应用/建应用/开权限/发布均由 setup 代做,不再列为人工待办
+			// 应用列表页由 Agent 自动打开/激活,不需要用户点顶部「应用开发」。
+			// 停在入口页时列表读不到应用,setup 会误判成「需要创建新应用」。
+			if listURL, ok := ensureAppListTab(p); ok {
+				res.Chrome = "already-running"
+				res.PageOpened = true
+				res.URL = listURL
+				res.Next = "已登录,Agent 已自动打开/激活" + p.Title + "的应用列表页(无需用户点「应用开发」、无需切终端);" +
+					"立即调用 hub.onboard.setup(confirmed=false) 拿动作清单,确认后重调即可自动进入已有应用/创建新应用并完成后续配置"
+				return res, nil
+			}
+			if p.AppListURL != "" {
+				res.Warning = "应用列表页自动打开失败,已回退到平台入口页;可重跑 hub.onboard.start"
+			}
 			res.Next = "已登录,无需扫码;立即调用 hub.onboard.setup(confirmed=false) 拿动作清单,确认后重调即可自动打开/创建应用并完成后续配置;" +
 				"不要让用户自己点进应用"
 		case w.LoginState == "waiting_login":
 			res.Phase = "waiting_login"
+			if p.AppListURL != "" {
+				res.Next = "用户尚未完成扫码登录;继续轮询 hub.onboard.watch,变成 logged_in 后调用 hub.onboard.setup(confirmed=false)。" +
+					"Agent 会自动进入" + p.Title + "的应用列表页,不需要用户点「应用开发」,也不用切终端"
+			}
 		}
 	}
 
@@ -280,6 +297,14 @@ func openPlatformEntryTab(p *Portal, rawURL string) bool {
 // 相比 rod 连接,这个 HTTP 端点不阻塞、不需要等页面加载完成、不会误关用户 Chrome。
 // 新版 Chrome 要求 PUT(GET 已被禁用)。
 func openDebugTab(rawURL string) bool {
+	_, ok := openDebugTabID(rawURL)
+	return ok
+}
+
+// openDebugTabID 与 openDebugTab 相同,但返回命中/新建的标签 ID。
+// 应用列表页的自动导航需要记住刚创建的 ID:新标签注册进 /json/list 之前,
+// 连续调用会各开一个重复标签(2026-11-11 实测)。
+func openDebugTabID(rawURL string) (string, bool) {
 	// 幂等:已有同 URL 标签就不再新开,但仍要激活到前台——调试 profile 里常留着
 	// 上一次接入的其他平台标签,不激活的话用户看到的仍是旧页面(2026-11-11 实测)。
 	if resp, err := cdpHTTPClient.Get(chromeDebugURL + "/json/list"); err == nil {
@@ -294,7 +319,7 @@ func openDebugTab(rawURL string) bool {
 			for _, it := range items {
 				if it.Type == "page" && it.URL == rawURL {
 					activateDebugTab(it.ID)
-					return true
+					return it.ID, true
 				}
 			}
 		}
@@ -302,23 +327,24 @@ func openDebugTab(rawURL string) bool {
 	req, err := http.NewRequest(http.MethodPut,
 		chromeDebugURL+"/json/new?"+url.QueryEscape(rawURL), nil)
 	if err != nil {
-		return false
+		return "", false
 	}
 	resp, err := cdpHTTPClient.Do(req)
 	if err != nil {
-		return false
+		return "", false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false
+		return "", false
 	}
 	var created struct {
 		ID string `json:"id"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&created) == nil {
 		activateDebugTab(created.ID)
+		return created.ID, true
 	}
-	return true
+	return "", true
 }
 
 // activateDebugTab 把指定标签切到前台(CDP /json/activate/<id>)。

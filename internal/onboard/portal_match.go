@@ -5,7 +5,7 @@ import "strings"
 // portalExcludes 是开放平台的功能页/登录页路径,不能当成应用详情页。
 // 旧版把这段数组散落在 watch/capture/create_app/focusDetailPage 四处,
 // 新增平台时漏一处就会误判,统一收敛到这里。
-var portalExcludes = []string{"/app/list", "/app/create", "/app/search", "/login"}
+var portalExcludes = []string{"/app/list", "/app/create", "/app/search", "/login", "/fe/app"}
 
 func containsExcluded(raw string) bool {
 	for _, ex := range portalExcludes {
@@ -147,19 +147,27 @@ func portalIsLoginPage(p *Portal, raw string) bool {
 // 调试 Chrome 的 MustPages() 顺序不受我们控制,旧版浏览器执行器直接取
 // 「第一个非 about:/chrome: 的标签」,接入钉钉时会绑到上一次残留的飞书标签,
 // 于是创建表单、inspect、页面文本全跑在飞书页面上(2026-11-11 实测)。
-// 优先级:本平台详情页 > 本平台非登录页 > 本平台登录页;其他平台标签一律跳过。
+// 优先级:本平台详情页 > 本平台应用列表页 > 本平台非登录页 > 本平台登录页;
+// 其他平台标签一律跳过。列表页排在入口页之前,是因为「读应用列表/创建应用」
+// 必须在列表页执行,而调试 profile 常同时留着入口页标签。
 // 返回 -1 表示浏览器里没有该平台的任何标签,调用方必须降级而不是硬跑。
 func pickPlatformPage(p *Portal, urls []string) int {
 	if p == nil {
 		return -1
 	}
-	domain, login := -1, -1
+	appList, domain, login := -1, -1, -1
 	for i, raw := range urls {
 		if !portalPageBelongs(p, raw) {
 			continue
 		}
 		if portalDetailMatch(p, raw) {
 			return i
+		}
+		if isAppListPage(p, raw) {
+			if appList < 0 {
+				appList = i
+			}
+			continue
 		}
 		if portalIsLoginPage(p, raw) {
 			if login < 0 {
@@ -170,6 +178,9 @@ func pickPlatformPage(p *Portal, urls []string) int {
 		if domain < 0 {
 			domain = i
 		}
+	}
+	if appList >= 0 {
+		return appList
 	}
 	if domain >= 0 {
 		return domain

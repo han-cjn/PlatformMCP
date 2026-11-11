@@ -208,11 +208,13 @@
 
 当用户提到「接入」「配置平台」「添加集成」「setup」时:
 
-1. 先调用 `hub.onboard.status`。它返回 `platforms`——**项目支持的全部平台**(能力清单从语义层能力矩阵动态生成),每项带 `id` / `name` / `credentials` / `setup_supported` / `browser_capture` / `dom_verified` / `capabilities` / `credential_fields` / `hint`
+1. 先调用 `hub.onboard.status`。它返回 `platforms`——**项目支持的全部平台**(能力清单从语义层能力矩阵动态生成),每项带 `id` / `name` / `credentials` / `setup_supported` / `browser_capture` / `dom_verified` / `app_list_verified` / `app_list_url` / `capabilities` / `credential_fields` / `hint`
 2. **用选择框把 `platforms` 全量列出让用户挑选**,不要只列 `missing`,也不要自己编平台清单:
-   - 每项展示中文名 + 凭据状态(已配置 / 待接入) + 是否支持自动接入 + `dom_verified`(Ops 是否真机校准) + 可用能力
+   - 每项展示中文名 + 凭据状态(已配置 / 待接入) + 是否支持自动接入 + `dom_verified`(Ops 是否真机校准) + `app_list_verified`(应用列表页是否真机实测) + 可用能力
    - **四个平台都支持自动接入**;`dom_verified=false` 的平台(钉钉/企微/腾讯文档)按可见文本声明动作,
      未经真机实测,若返回 `selector_miss` 属预期,按 `next` 降级 `set_credentials`,不要当成崩溃
+   - 钉钉 `app_list_verified=true`:应用列表页 URL / 行选择器 / 详情页 URL 已实测,
+     Agent 会**自动进入应用列表页并点进已有应用**;但创建/权限/发布表单仍未实测,两者不要混为一谈
    - **已配置的平台也要列出**(用户可能想重新接入、重新体检或切换)
    - 选中项的 `id` 作为后续所有工具的 `platform` 参数
    - 只有用户明确说"不接入"时才结束;不要因为 `missing` 为空就跳过选择框
@@ -221,7 +223,9 @@
    **不要只把命令打印给用户,也不要让用户去终端跑脚本。**
    - 返回 `phase=ready_to_capture` → 用户已登录且已停在应用凭证页,
      **跳过扫码与人工步骤,直接进入第 4 步调 `setup`**。不要再提示扫码或建应用。
-   - 返回 `phase=logged_in` → 用户已登录,**不要再让他扫码**。
+   - 返回 `phase=logged_in` → 用户已登录,**不要再让他扫码**;`url` 是应用列表页时说明
+     Agent 已自动打开/激活列表页,**不要让用户点顶部「应用开发」,也不要让他自己点进应用**。
+     连续重试 `start` 是幂等的,不会堆重复标签。
    - 只有 `phase=waiting_login` 才需要转述登录步骤。
 4. **轮询 `hub.onboard.watch` 监听登录进度**,不必等用户说"我扫完了":
    - `waiting_login` → 等几秒继续轮询,期间不要催促
@@ -246,6 +250,10 @@
      不要整体重跑。调用 `hub.onboard.inspect` 拿候选(带标签/role)与 `candidates` 一起转述,
      **绝不自动重试提交表单**
    - `phase=unsupported` → 该平台没有对应动作(如腾讯文档无需创建应用),**进第 6 步**用 `set_credentials` 收尾,不要转去 `capture`
+   - `phase=page_loading` → 应用列表页刚打开、页面特征还没渲染完,**此时不能判断企业内是否已有应用**;
+     等 1~2 秒重试 `setup(confirmed=false)`,**不要给用户确认框、更不要让用户确认创建应用**
+   - `steps[].status=done` 且 message 含「已自动进入应用列表页…点击进入已有应用」→ 工具复用了企业里已有的应用,
+     `plan` 里不应出现「创建应用」;如实转述进入了哪个应用,不要让用户再点一次
    - `steps[].status=selector_miss` 且 `dom_verified=false` → 属预期,用 `inspect` 校准或降级 `set_credentials`,绝不重复提交表单
    - `browser_missing` / `waiting_login` → 按 `next` 提示重试
 6. **`hub.onboard.set_credentials` 是零 DOM 依赖的通用兜底**(四平台通吃):
@@ -272,8 +280,9 @@
 **边界说明**:
 
 - 登录(扫码/验证码)与管理员审批**必须人工在浏览器里点**;
-  点应用、创建应用、开通权限、版本发布**由 `hub.onboard.setup` 按平台声明代做**(四平台全量),但必须先经选择框显式确认。
-  腾讯文档授权页即凭据页,没有创建/权限/发布环节;只有飞书的 Ops 在真实后台校准过(`dom_verified=true`)
+  进入应用列表页、点进已有应用、创建应用、开通权限、版本发布**由 `hub.onboard.start` / `hub.onboard.setup` 按平台声明代做**(四平台全量),其中创建/权限/发布必须先经选择框显式确认。
+  腾讯文档授权页即凭据页,没有创建/权限/发布环节;只有飞书的 Ops 在真实后台完整校准过(`dom_verified=true`),
+  钉钉的 `app_list_verified=true` 只代表列表页/详情页 URL 与行选择器实测过,不代表创建/权限/发布表单已校准
 - `setup` 权限阶段先用 **API 只读探针**验证,已可用(`api_verified`)或无法确认(`skipped`)
   都跳过 UI 开通;发布阶段先做只读幂等检测,已完成就跳过。各阶段**独立执行**,
   单阶段未命中只停该阶段、不阻断后续阶段,且绝不重试提交表单,避免留下半提交状态

@@ -164,8 +164,8 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 | 工具 | 作用 |
 |---|---|
-| `hub.onboard.status()` | 返回 `platforms` 全量清单（含 `credential_fields`、`dom_verified`）及兼容字段 `supported` / `missing` / `configured`；能力清单从语义层矩阵动态生成 |
-| `hub.onboard.start(platform)` | 起带调试端口的 Chrome 并打开该平台开放平台/授权页；**带状态感知**，已登录/已在详情页时不再列扫码建应用 |
+| `hub.onboard.status()` | 返回 `platforms` 全量清单（含 `credential_fields`、`dom_verified`、`app_list_verified` / `app_list_url`）及兼容字段 `supported` / `missing` / `configured`；能力清单从语义层矩阵动态生成 |
+| `hub.onboard.start(platform)` | 起带调试端口的 Chrome 并打开该平台页面；**带状态感知**，已登录且已停在详情页时不再列扫码建应用，已登录但未进详情时**自动打开/激活应用列表页**（无需用户点「应用开发」） |
 | `hub.onboard.watch(platform)` | 只读轮询 CDP 标签 URL，按各平台声明的登录域与详情页特征判定进度 |
 | `hub.onboard.setup(platform, app_name?, confirmed?)` | **推荐入口**：按平台声明式跑「打开/创建应用 → 抓凭据 → 权限 → 发布」，各阶段独立；腾讯文档授权页即凭据页，无需创建/权限/发布 |
 | `hub.onboard.set_credentials(platform, values)` | **零 DOM 兜底**：Agent 用表单收集用户复制的凭据 → 格式校验 → 真连校验 → 写 `.env` → 热重载，四平台通用 |
@@ -177,13 +177,13 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 1. **L1 凭据兜底**（`set_credentials`）：不依赖任何 DOM，四平台通用；真连校验失败一律不写盘，回复里不回显凭据值。任何页面选择器失败都降级到这里，永不要求用户切终端。
 2. **L2 浏览器抓取**：四平台的 `collect-creds` 都挂了声明式动作。飞书按实测 DOM 读 `.secret-code__code`；钉钉/企微/腾讯文档用 `readPage` + 正则从整页可见文本抽取（零 class 依赖），抽不到按 `next` 降级 L1。
-3. **L3 全链路**（`setup`）：`platformStages(p)` 按平台提供权限/发布 Ops，`Portal.Flow` 区分应用控制台与 Token 授权页，`createAppAction` 按 `create-*` 前缀匹配。`platforms[].dom_verified` **如实标注**：只有飞书的 Ops 在真实后台校准过，其余三个按可见文本声明、未经真机实测，`selector_miss` 时降级 L1，不静默重试提交。
+3. **L3 全链路**（`setup`）：`platformStages(p)` 按平台提供权限/发布 Ops，`Portal.Flow` 区分应用控制台与 Token 授权页，`createAppAction` 按 `create-*` 前缀匹配。`platforms[].dom_verified` **如实标注**：只有飞书的 Ops 在真实后台完整校准过，其余三个按可见文本声明、未经真机实测，`selector_miss` 时降级 L1，不静默重试提交。`app_list_verified` 是独立的一档：钉钉的**应用列表页 URL、行选择器与详情页 URL** 已真机实测，但创建/权限/发布表单仍未实测，两者不能混为一谈。
 
 `start` 会先跑一次 `watch`：若已停在应用详情页，返回 `phase=ready_to_capture`、`manual_steps=[]`，并跳过开新标签，直接引导 Agent 调 `setup`——避免「人已经登录了还让我扫码建应用」。仅 `waiting_login` 时才列出登录步骤。四平台的登录域与详情页特征由 `Portal.LoginHosts` / `CredPages` / `AppIDRe` 声明，判定统一收敛在 `portalDetailMatch`，不再把飞书的 `/app/<appId>` 硬编码成通用规则。
 
 `create_app` 有两道门：**幂等门**（已打开详情页或列表页已有应用时一律不新建，直接复用并走 `capture`）与**确认门**（`confirmed=false` 只返回 `need_confirmation`，不碰任何按钮，让 Agent 用选择框征求同意）。创建表单按可见文本匹配按钮、CSS 多候选定位输入框，不绑定易变的 class；任一步未命中返回 `selector_miss` 并附页面候选元素，**降级且不静默重试提交**。提交后必须验证出现新的应用/机器人详情页才算成功。腾讯文档没有应用概念，该工具返回 `unsupported` 并指向 `set_credentials`。登录（扫码/验证码）仍需人工；权限开通与版本发布可交由 `setup` 自动完成。
 
-`setup` 是端到端入口：`confirmed=false` 先返回该平台的 `plan`（创建应用 / 开权限 / 发布版本等会在企业里真实产生记录；腾讯文档的 plan 只有「打开授权页 + 读 Token」），用户确认后带 `confirmed=true` 重调。应用控制台类平台会**自动打开或创建应用详情页**（从列表页读出应用链接直接打开，不需要用户点击）、抓凭据写 `.env` 并热重载，再跑权限与发布两个**相互独立**的阶段；Token 授权页类平台直接读 Token 完成接入。
+`setup` 是端到端入口：`confirmed=false` 先返回该平台的 `plan`（创建应用 / 开权限 / 发布版本等会在企业里真实产生记录；腾讯文档的 plan 只有「打开授权页 + 读 Token」），用户确认后带 `confirmed=true` 重调。应用控制台类平台会**自动进入应用列表页、识别已有应用并点进其详情页**（不需要用户点击；列表是行元素而非链接时按 Portal 声明的行选择器点击）、抓凭据写 `.env` 并热重载，再跑权限与发布两个**相互独立**的阶段；Token 授权页类平台直接读 Token 完成接入。若列表页还在加载、无法确认页面特征，返回 `phase=page_loading` 而不是给出含「创建应用」的确认清单——创建不可撤销，必须先确认真的没有可复用应用。
 
 **飞书权限 API 优先**（2026-11-09 实测踩坑后调整）：先用只读探针 `GET /open-apis/im/v1/chats?page_size=1` 判断能力是否可用——通了返回 `api_verified` 并**跳过整个 UI 开通流程**，既避开「点不到菜单就报失败」，也避免权限已开通时重复提交；无法确认（`unknown` / `no_credentials`）同样跳过 UI、标 `skipped` 且不做任何变更；只有平台明确返回权限不足（`needs_perms`）才进 UI 开通。`perm_probe` 如实区分 `checked`（仅群列表读权限）与 `unverified`（`im:message` 发消息、`bitable:app` 多维表格），**不把单个 API 调通等同于三个 scope 全部已开通**。钉钉/企微没有等价的权限校验 API，改为走页面只读探测（点菜单 + `readPage`）做幂等检测，由 `Done(text)` 判断是否已开通，不会被 `unsupported` 探针短路成永久跳过。
 
@@ -195,7 +195,9 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **跨平台标签隔离**（2026-11-11 实测）：调试 profile 会长期保留上一次接入的标签。飞书详情页 `open.feishu.cn/app/cli_xxx/baseinfo` 同时含 `/app/` 与 `/baseinfo`，曾命中钉钉的 `CredPages`，导致接入钉钉时 `watch` 误判已进详情页、`start` 提前返回 `ready_to_capture` 且不再打开钉钉页面、`setup` 的 `app_url` 指向飞书。修复后所有 URL 判定先经 `portalPageBelongs` 做域白名单校验（各平台主域 `feishu.cn` / `dingtalk.com` / `weixin.qq.com` / `docs.qq.com`，并合并 `LoginHosts` / `CredPages`），`start` 的提前返回还额外要求 `detail_url` 属于本平台并回传真实停留页面；`openPlatformEntryTab` 对会 302 到独立登录域的入口页按「同平台域内已有标签」幂等并激活到前台，避免重试 `start` 堆积重复标签。
 
-**浏览器执行器同样按平台绑定标签**（2026-11-11 第二轮实测）：`NewBrowserExecutor` 原先取 `MustPages()` 里第一个真实标签，多标签时创建表单 / `inspect` / `readPage` 会跑在上一次接入的飞书页面上，表现为 `selector_miss` 且 candidates 全是飞书元素。现在 `NewBrowserExecutorForPlatform` + `pickPlatformPage` 按「本平台详情页 > 本平台非登录页 > 登录页」选择并激活，找不到该平台标签就直接降级而不是在别的平台页面上执行动作；`inspect` 也不再忽略定位失败去 dump 飞书页面。另：开放平台入口页通常不渲染应用列表（实测钉钉 `?hash=%23%2F#/` 只有 3 个文档链接），「未检测到已有应用」不等于「企业内没有应用」，确认清单已如实标注未验证，避免重复创建不可撤销的应用。
+**浏览器执行器同样按平台绑定标签**（2026-11-11 第二轮实测）：`NewBrowserExecutor` 原先取 `MustPages()` 里第一个真实标签，多标签时创建表单 / `inspect` / `readPage` 会跑在上一次接入的飞书页面上，表现为 `selector_miss` 且 candidates 全是飞书元素。现在 `NewBrowserExecutorForPlatform` + `pickPlatformPage` 按「本平台详情页 > 本平台应用列表页 > 本平台非登录页 > 登录页」选择并激活，找不到该平台标签就直接降级而不是在别的平台页面上执行动作；`inspect` 也不再忽略定位失败去 dump 飞书页面。
+
+**应用列表页自动导航**（2026-11-11 第三轮真机实测）：开放平台入口页通常不渲染应用列表（钉钉 `?hash=%23%2F#/` 只有 3 个文档链接），停在入口页会把「读不到应用链接」误判成「企业里没有应用」。钉钉三段 URL 实测为：入口页 `?hash=%23%2F#/` → 列表页 `/fe/app?hash=...#/corp/app`（可直接导航，登录态在同一持久化 profile 内保留）→ 详情页 `/fe/ai?...#/app/<uuid>/dev`。`Portal.AppListURL` / `AppListMarkers` / `AppListRowSelector` 声明这三层，`ensureAppListTab` 用 CDP 幂等打开/激活列表页（短轮询 + 记住刚创建的标签 ID，避免连续 `start` 堆重复标签），`listExistingApps` 读 `tr[data-row-key] h5[title]` 行作为「已有应用」证据并返回 `NeedsClick`，`clickAppRow` 纯导航点击进入详情。`listVerified=false` 时 `setup` 返回 `page_loading` 而非创建清单，杜绝误建。详情页 URL 判定改用实测的 `#/app/<uuid>` + `/fe/ai`，并把 `/fe/app` 加入排除段，列表页不再被当成详情页。
 
 四平台凭据配置有交互式向导，含真连校验：
 
