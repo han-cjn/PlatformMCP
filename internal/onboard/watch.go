@@ -96,6 +96,12 @@ func classifyPages(p *Portal, pages []string) (state string, inDetail bool, deta
 	targetHost := hostOf(p.URL)
 	hasTarget, hasLogin := false, false
 	for _, u := range pages {
+		// 调试 profile 会长期留下其他平台的标签。只按路径片段判定时,
+		// 飞书的 /app/<id>/baseinfo 会被钉钉 CredPages 命中,导致接入钉钉
+		// 却停在飞书页面。先做域隔离,只有本平台生态的标签才参与阶段判定。
+		if !portalPageBelongs(p, u) {
+			continue
+		}
 		login := portalIsLoginPage(p, u)
 		if login {
 			hasLogin = true

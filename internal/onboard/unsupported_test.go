@@ -23,6 +23,7 @@ func assertNoDeadEnd(t *testing.T, where, next string) {
 // TestSetupBrowserMissingNoDeadEnd L3 后四平台的 setup 不再返回 unsupported;
 // 无调试 Chrome 时统一返回 browser_missing,且指引里绝不能出现终端命令。
 func TestSetupBrowserMissingNoDeadEnd(t *testing.T) {
+	withUnreachableCDP(t)
 	for _, id := range []string{"dingtalk", "wecom", "tencent-docs"} {
 		res, err := Setup(id, "", false, nil)
 		if err != nil {
@@ -52,6 +53,7 @@ func TestCreateAppUnsupportedNoDeadEnd(t *testing.T) {
 // TestCreateAppBrowserMissingNoTerminal 已声明创建动作的平台在无调试 Chrome 时
 // 快速返回 browser_missing,指引里不能出现终端命令(PUA:同类降级路径一起验)。
 func TestCreateAppBrowserMissingNoTerminal(t *testing.T) {
+	withUnreachableCDP(t)
 	for _, id := range []string{"dingtalk", "wecom"} {
 		res, err := CreateApp(id, "", false, nil)
 		if err != nil {

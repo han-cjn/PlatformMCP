@@ -78,10 +78,11 @@ func StartPlatform(platform string) (*StartResult, error) {
 	// Agent 会把这些当成待办转述,流程就永远卡在第一步。
 	if w, err := Watch(platform); err == nil && w.ChromeReady {
 		switch {
-		case w.InAppDetail:
+		case readyToCapture(p, w):
 			res.Phase = "ready_to_capture"
 			res.Chrome = "already-running"
 			res.PageOpened = true // 目标页面已打开,不再新开标签干扰用户
+			res.URL = w.DetailURL // 返回真实停留的详情页,不要拿 Portal.URL 冒充"已打开"
 			res.ManualSteps = []string{}
 			res.Next = "检测到你已登录且已停在凭据页,无需扫码、无需创建应用;" +
 				"请立即调用 hub.onboard.setup(confirmed=false) 拿该平台动作清单,用户确认后重调完成抓凭据→写 .env→热重载及适用的权限/发布。" +
@@ -112,7 +113,7 @@ func StartPlatform(platform string) (*StartResult, error) {
 		}
 	}
 
-	res.PageOpened = openDebugTab(p.URL)
+	res.PageOpened = openPlatformEntryTab(p, p.URL)
 	if !res.PageOpened {
 		// 调试端口不可用时的兜底:至少把页面呈现给用户(登录态可能不共享)
 		res.PageOpened = openURLWithSystem(p.URL)
@@ -121,6 +122,14 @@ func StartPlatform(platform string) (*StartResult, error) {
 		}
 	}
 	return res, nil
+}
+
+// readyToCapture 是 start 提前返回 ready_to_capture 的闸门。
+// 除了 InAppDetail,还要求 DetailURL 确实属于本平台域:调试 profile 里
+// 残留的其他平台详情页不能再让 start 跳过打开目标页面。
+func readyToCapture(p *Portal, w *WatchResult) bool {
+	return w != nil && w.ChromeReady && w.InAppDetail &&
+		w.DetailURL != "" && portalPageBelongs(p, w.DetailURL)
 }
 
 // manualSteps 抽取清单中必须人工完成的步骤(无浏览器代填动作的步骤)。
@@ -237,22 +246,54 @@ func startDebugChrome(bin, profile string) error {
 	return fmt.Errorf("Chrome 已启动但 %s 调试端点在 %s 内未就绪", chromeDebugURL, chromeWaitMax)
 }
 
-// openDebugTab 通过 CDP 的 /json/new 在调试实例里开新标签。
+// openPlatformEntryTab 打开平台入口页(供 start 使用)。
+//
+// 开放平台入口常会 302 到独立登录域(2026-11-11 实测:钉钉
+// open-dev.dingtalk.com → login.dingtalk.com/oauth2/challenge.htm),此时只按
+// URL 精确匹配的幂等判断失效,Agent 每次重试 start 都会再开一个标签。
+// 入口页只要求「该平台域内已有标签」,命中即激活到前台、不再新开;具体应用
+// 详情页仍走 openDebugTab 的精确匹配,避免 setup 把首页误当成详情页。
+func openPlatformEntryTab(p *Portal, rawURL string) bool {
+	if p != nil {
+		if resp, err := cdpHTTPClient.Get(chromeDebugURL + "/json/list"); err == nil {
+			var items []struct {
+				Type string `json:"type"`
+				URL  string `json:"url"`
+				ID   string `json:"id"`
+			}
+			ok := json.NewDecoder(resp.Body).Decode(&items) == nil
+			resp.Body.Close()
+			if ok {
+				for _, it := range items {
+					if it.Type == "page" && portalPageBelongs(p, it.URL) {
+						activateDebugTab(it.ID)
+						return true
+					}
+				}
+			}
+		}
+	}
+	return openDebugTab(rawURL)
+}
+
+// openDebugTab 通过 CDP 的 /json/new 在调试实例里开新标签,并把目标标签切到前台。
 // 相比 rod 连接,这个 HTTP 端点不阻塞、不需要等页面加载完成、不会误关用户 Chrome。
 // 新版 Chrome 要求 PUT(GET 已被禁用)。
 func openDebugTab(rawURL string) bool {
-	// 幂等:已有同 URL 标签就不再新开。Agent 每次重试 start 都开一个新标签,
-	// 会让 /json/list 堆满重复页,watch 的阶段判定也更容易被干扰。
+	// 幂等:已有同 URL 标签就不再新开,但仍要激活到前台——调试 profile 里常留着
+	// 上一次接入的其他平台标签,不激活的话用户看到的仍是旧页面(2026-11-11 实测)。
 	if resp, err := cdpHTTPClient.Get(chromeDebugURL + "/json/list"); err == nil {
 		var items []struct {
 			Type string `json:"type"`
 			URL  string `json:"url"`
+			ID   string `json:"id"`
 		}
 		ok := json.NewDecoder(resp.Body).Decode(&items) == nil
 		resp.Body.Close()
 		if ok {
 			for _, it := range items {
 				if it.Type == "page" && it.URL == rawURL {
+					activateDebugTab(it.ID)
 					return true
 				}
 			}
@@ -268,7 +309,29 @@ func openDebugTab(rawURL string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&created) == nil {
+		activateDebugTab(created.ID)
+	}
+	return true
+}
+
+// activateDebugTab 把指定标签切到前台(CDP /json/activate/<id>)。
+// 激活失败不影响页面已打开这一结果,故静默忽略。
+func activateDebugTab(id string) {
+	if id == "" {
+		return
+	}
+	resp, err := cdpHTTPClient.Get(chromeDebugURL + "/json/activate/" + url.PathEscape(id))
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }
 
 // openURLWithSystem 兜底:macOS 用 open 交给默认浏览器。

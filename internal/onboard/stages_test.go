@@ -126,6 +126,7 @@ func TestAPIProbeOnlyFeishu(t *testing.T) {
 // TestSetupAllPlatformsNoUnsupported 四平台 setup 都不再撞 unsupported 死路;
 // 无调试 Chrome 时统一快速返回 browser_missing 且不含终端命令。
 func TestSetupAllPlatformsNoUnsupported(t *testing.T) {
+	withUnreachableCDP(t)
 	for _, id := range PlatformOrder() {
 		res, err := Setup(id, "", false, nil)
 		if err != nil {

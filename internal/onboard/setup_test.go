@@ -8,6 +8,7 @@ import (
 // TestSetupUnsupportedPlatform L3 后四平台都有 setup 链路:无调试 Chrome 时
 // 应快速返回 browser_missing 而不是 unsupported,且不让用户切终端。
 func TestSetupUnsupportedPlatform(t *testing.T) {
+	withUnreachableCDP(t)
 	res, err := Setup("dingtalk", "", false, nil)
 	if err != nil {
 		t.Fatalf("不应报错: %v", err)
