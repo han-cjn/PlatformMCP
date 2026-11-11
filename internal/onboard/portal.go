@@ -49,6 +49,13 @@ type Portal struct {
 	AppListURL         string   // 应用列表页 URL
 	AppListMarkers     []string // 列表页可见文本特征,用于确认页面已渲染
 	AppListRowSelector string   // 列表页已有应用的可点击元素(每行一个),读到即证明已有应用
+
+	// ---- 应用详情内的凭据 tab(2026-11-11 钉钉真机实测) ----
+	// 钉钉后台是单页多 tab:/baseinfo(凭证) /permission(权限) /version(版本)。
+	// 点进应用默认落在 /permission,不切 tab 就读不到 Client ID / Client Secret,
+	// 旧版 collect-creds 直接 readPage 必然 extract 失败。
+	CredTab         string // 左侧菜单文本,用于自动切到凭据页
+	CredTabFragment string // 凭据页 URL hash 片段,用于确认切页是否成功
 }
 
 // BrowserAction 浏览器执行器动作序列;Script 为选择器版本标记(平台改版只改数据)。
@@ -214,20 +221,29 @@ var Portals = map[string]*Portal{
 					{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(确定|确认|提交|创建)\\s*$"},
 				},
 			}},
-			{ID: "enable-perms", Brief: "权限:通讯录只读 + 消息推送 + 相关 SmartForm", Detail: []string{
-				"历史踩坑:qyapi_addresslist_search 必须勾上,否则收不到群消息",
+			{ID: "enable-perms", Brief: "权限管理:按权限点 code 只读核对开通状态", Detail: []string{
+				"真机实测:页面按 Contact.User.mobile / Calendar.Event.Write 等英文 code 列权限,状态为「未开通 / 已开通 / 立即开通」",
+				"Hub 的钉钉能力只依赖 Client ID/Secret + Stream 长连接,不依赖这些 API 权限;不自动逐个开通",
 			}},
-			// 选择器策略:钉钉后台是 SPA,不做 class 绑定。先 readPage 拿整页文本,
-			// 再用正则从「AppKey / AppSecret」标签附近抽取;任一未命中即降级
-			// hub.onboard.set_credentials,不静默重试、不猜 DOM。
-			{ID: "collect-creds", Brief: "凭证与基础信息:复制 AppKey / AppSecret", Cred: true,
+			// 2026-11-11 真机实测 /baseinfo 页:
+			//   "应用凭证 App ID : <uuid> 原企业内部应用AgentId <num>
+			//    Client ID (原 AppKey 和 SuiteKey) <ding...>
+			//    Client Secret (原 AppSecret 和 SuiteSecret) 当前使用:xxxx****xxxx"
+			// Client ID 明文可读;Client Secret 只有掩码,平台不提供明文,纯 DOM 抓不到。
+			// 因此先自动切 tab 再读,并如实把掩码交给格式校验 → capture 降级
+			// set_credentials(只需用户补 Secret),绝不用掩码写 .env。
+			{ID: "collect-creds", Brief: "凭证与基础信息:读 Client ID / Client Secret", Cred: true,
 				URLs: []string{"https://open-dev.dingtalk.com/"},
 				Browser: &BrowserAction{
-					Script: "dingtalk@2026-11-creds",
+					Script: "dingtalk@2026-11-11-creds",
 					Ops: []Op{
+						// 点进应用默认停在 /permission;先切到 /baseinfo 再读。
+						{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*凭证与基础信息\s*$`},
+						{Kind: "click", Target: menuCandidateSelector, Match: `^\s*凭证与基础信息\s*$`},
+						{Kind: "waitVisible", Target: "body", Match: `应用凭证|Client\s*ID`},
 						{Kind: "readPage"},
-						{Kind: "extract", Target: `(?i)(?:AppKey|Client\s*ID|应用标识)[^\n]{0,80}?(ding[A-Za-z0-9]{6,})`, ExtractKey: "DINGTALK_Client_ID"},
-						{Kind: "extract", Target: `(?i)(?:AppSecret|Client\s*Secret|应用密钥)[^\n]{0,80}?([A-Za-z0-9_-]{16,})`, ExtractKey: "DINGTALK_Client_Secret"},
+						{Kind: "extract", Target: `(?is)Client\s*ID[\s\S]{0,200}?\b(ding[A-Za-z0-9]{6,})\b`, ExtractKey: "DINGTALK_Client_ID"},
+						{Kind: "extract", Target: `(?is)Client\s*Secret[\s\S]{0,220}?([A-Za-z0-9_*\-]{16,})`, ExtractKey: "DINGTALK_Client_Secret"},
 					},
 				}},
 		},
@@ -241,13 +257,18 @@ var Portals = map[string]*Portal{
 		CredPages:  []string{"/fe/ai", "appId=", "/detail", "/baseinfo"},
 		LoginHosts: []string{"login.dingtalk.com", "accounts.dingtalk.com", "oapi.dingtalk.com"},
 		AppIDRe:    regexp.MustCompile(`(?:#/app/|(?:appId|app_id|clientId)=)([A-Za-z0-9_-]{6,})`),
-		Perms:      []string{"通讯录只读", "消息推送", "SmartForm"},
+		// 真机 /permission 页的权限点是英文 code,不是飞书式中文标签。这里只保留
+		// 页面只读比对用的代表性样本;Hub 的 Stream 模式不要求开通这些 API 权限。
+		Perms: []string{"Contact.User.Read", "Calendar.Event.Read", "snsapi_base"},
 		// 列表页文本特征:「创建应用」按钮 +「全部应用」筛选 +「全部分组」。
 		// 已有应用渲染为 <tr data-row-key><h5 title="应用名">,不是 a[href]。
 		AppListURL:         "https://open-dev.dingtalk.com/fe/app?hash=%23%2Fcorp%2Fapp#/corp/app",
 		AppListMarkers:     []string{"创建应用", "全部应用", "全部分组"},
 		AppListRowSelector: "tr[data-row-key] h5[title]",
-		Validate:           ValidateDingTalk,
+		// 详情页三个 tab 实测 hash:/baseinfo(凭证) /permission(权限) /version(版本)。
+		CredTab:         "凭证与基础信息",
+		CredTabFragment: "/baseinfo",
+		Validate:        ValidateDingTalk,
 	},
 	"wecom": {
 		Name:  "wecom",

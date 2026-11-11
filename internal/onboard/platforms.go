@@ -13,6 +13,7 @@ type PlatformInfo struct {
 	BrowserCapture  bool        `json:"browser_capture"`
 	DomVerified     bool        `json:"dom_verified"`      // 创建/权限/发布 Ops 是否在真实后台 DOM 上完整校准过
 	AppListVerified bool        `json:"app_list_verified"` // 应用列表页 URL/行选择器是否真机实测过
+	TabsVerified    bool        `json:"tabs_verified"`     // 应用详情内 tab(凭证/权限/版本)导航是否真机实测
 	AppListURL      string      `json:"app_list_url,omitempty"`
 	Capabilities    []string    `json:"capabilities"`
 	CredentialKeys  []CredField `json:"credential_fields"`
@@ -28,7 +29,7 @@ var platformNames = map[string]string{
 
 var platformHints = map[string]string{
 	"feishu":       "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准",
-	"dingtalk":     "Agent 自动进入应用列表页(真机实测)并点进已有应用;创建/权限/发布表单未实测,selector_miss 时降级 set_credentials",
+	"dingtalk":     "Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab(真机实测);Client Secret 后台只显示掩码,需用户补一次,按 next 用 set_credentials 补齐;权限与版本只读核对状态、不自动提交未校准表单",
 	"wecom":        "支持 Agent 自动创建智能机器人、抓凭据与启用;后台 DOM 未实测,selector_miss 时降级 set_credentials",
 	"tencent-docs": "授权页即凭据页,Agent 可自动读 Token 并完成接入;无需建应用/开权限/发布,DOM 未实测时降级 set_credentials",
 }
@@ -60,9 +61,12 @@ func SupportedPlatforms(capabilities map[string][]string) []PlatformInfo {
 			Credentials: state,
 			// 四个平台都挂了凭据动作,因此 setup 全链路都可用;
 			// dom_verified 如实区分「真实后台校准过」与「按可见文本声明、待实测」。
-			SetupSupported:  p != nil && credAction(p) != nil,
+			SetupSupported: p != nil && credAction(p) != nil,
+			// dom_verified 只标「创建/权限/发布表单已完整校准」:钉钉虽然实测了
+			// 三个 tab 的导航与幂等文本,但那些表单仍未校准,因此保持 false。
 			DomVerified:     id == "feishu",
 			AppListVerified: p != nil && p.AppListURL != "" && p.AppListRowSelector != "",
+			TabsVerified:    p != nil && p.CredTab != "" && p.CredTabFragment != "",
 			AppListURL:      listURL,
 			BrowserCapture:  p != nil && credAction(p) != nil,
 			Capabilities:    caps,

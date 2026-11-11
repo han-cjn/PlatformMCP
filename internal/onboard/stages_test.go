@@ -25,8 +25,11 @@ func TestPlatformStagesPerPlatform(t *testing.T) {
 				t.Fatalf("%s/%s 脚本缺平台前缀: %s", id, s.ID, s.Action.Script)
 			}
 			probe, apply := opsForScope(s.Action, "probe"), opsForScope(s.Action, "apply")
-			if len(probe) == 0 || len(apply) == 0 {
-				t.Fatalf("%s/%s 的 probe/apply 不得为空", id, s.ID)
+			if len(probe) == 0 || (len(apply) == 0 && s.ApplyNote == "") {
+				t.Fatalf("%s/%s 的 probe 不得为空;无 apply 时必须带 ApplyNote 说明降级原因", id, s.ID)
+			}
+			if s.ApplyNote != "" && len(apply) > 0 {
+				t.Fatalf("%s/%s 声明了 not_required 却仍保留会误提交的 apply Ops", id, s.ID)
 			}
 			if probe[0].Kind != "waitVisible" || probe[0].Target != menuCandidateSelector || probe[0].Match == "" {
 				t.Fatalf("%s/%s 的 probe 首步应为统一选择器的带文本等待: %+v", id, s.ID, probe[0])
@@ -69,13 +72,16 @@ func TestSetupPlanPerPlatform(t *testing.T) {
 		}
 	}
 	ding := strings.Join(setupPlan(Portals["dingtalk"], "", false), "|")
-	for _, want := range []string{"通讯录只读", "AppKey", "AppSecret", "1.0.0"} {
+	// 2026-11-11 真机 /permission 页的权限点是英文 code,不再是飞书式中文标签。
+	for _, want := range []string{"Contact.User.Read", "AppKey", "AppSecret", "核对版本发布状态", "不自动开通"} {
 		if !strings.Contains(ding, want) {
 			t.Fatalf("钉钉 plan 缺 %q: %s", want, ding)
 		}
 	}
-	if strings.Contains(ding, "im:message") {
-		t.Fatal("钉钉 plan 不应混入飞书权限 scope")
+	for _, bad := range []string{"im:message", "创建版本 1.0.0 并申请发布", "开通权限:", "通讯录只读", "消息推送", "SmartForm"} {
+		if strings.Contains(ding, bad) {
+			t.Fatalf("钉钉 plan 不应含 %q(权限/发布已改为只读核对): %s", bad, ding)
+		}
 	}
 	wecom := strings.Join(setupPlan(Portals["wecom"], "", false), "|")
 	if !strings.Contains(wecom, "收发消息") || !strings.Contains(wecom, "Bot ID") {

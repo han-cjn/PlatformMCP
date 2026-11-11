@@ -27,8 +27,15 @@ var feishuChatsProbeURL = "https://open.feishu.cn/open-apis/im/v1/chats?page_siz
 // probePerms 可注入,单测替换为 stub 避免真实网络调用。
 var probePerms = ProbePerms
 
-func allPermsUnverified() []string {
-	return append([]string(nil), defaultPerms...)
+// permsUnverified 按平台返回「未能验证」的权限清单。
+// 旧版对非飞书平台也返回 defaultPerms(飞书的 im:message/im:chat/bitable:app),
+// 会让钉钉的 perm_probe.unverified 串出飞书 scope、误导 Agent(2026-11-11 实测)。
+// 非飞书平台即使没有声明 Perms(如腾讯文档授权页)也返回空,绝不回退飞书默认集。
+func permsUnverified(platform string) []string {
+	if p := Portals[platform]; p != nil {
+		return append([]string(nil), p.Perms...)
+	}
+	return nil
 }
 
 // ProbePerms 用平台 API 判断权限是否可用:零副作用、不打开浏览器、不点任何按钮。
@@ -38,28 +45,28 @@ func allPermsUnverified() []string {
 // 在权限可能已开通时盲点「开通权限」会产生不可撤销的企业记录。
 func ProbePerms(platform string) PermProbeResult {
 	if platform != "feishu" {
-		return PermProbeResult{Status: "unsupported", Unverified: allPermsUnverified(),
-			Detail: "当前仅 feishu 定义了只读权限探针"}
+		return PermProbeResult{Status: "unsupported", Unverified: permsUnverified(platform),
+			Detail: "当前仅 feishu 定义了只读权限探针;该平台权限状态改由 setup 的只读页面文本核对,不再套用飞书 scope"}
 	}
 	id := strings.TrimSpace(os.Getenv("FEISHU_APP_ID"))
 	secret := strings.TrimSpace(os.Getenv("FEISHU_APP_SECRET"))
 	if id == "" || secret == "" {
-		return PermProbeResult{Status: "no_credentials", Unverified: allPermsUnverified(),
+		return PermProbeResult{Status: "no_credentials", Unverified: permsUnverified(platform),
 			Detail: "进程内尚无飞书凭据,先完成 capture 或重启 Hub 加载 .env"}
 	}
 	token, err := feishuTenantToken(id, secret)
 	if err != nil {
-		return PermProbeResult{Status: "unknown", Unverified: allPermsUnverified(),
+		return PermProbeResult{Status: "unknown", Unverified: permsUnverified(platform),
 			Detail: "换取 tenant_access_token 失败: " + err.Error()}
 	}
 	req, err := http.NewRequest(http.MethodGet, feishuChatsProbeURL, nil)
 	if err != nil {
-		return PermProbeResult{Status: "unknown", Unverified: allPermsUnverified(), Detail: err.Error()}
+		return PermProbeResult{Status: "unknown", Unverified: permsUnverified(platform), Detail: err.Error()}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return PermProbeResult{Status: "unknown", Unverified: allPermsUnverified(),
+		return PermProbeResult{Status: "unknown", Unverified: permsUnverified(platform),
 			Detail: "权限探针请求失败: " + err.Error()}
 	}
 	defer resp.Body.Close()
@@ -78,9 +85,9 @@ func ProbePerms(platform string) PermProbeResult {
 			Detail:     detail,
 		}
 	case "needs_perms":
-		return PermProbeResult{Status: "needs_perms", Unverified: allPermsUnverified(), Detail: detail}
+		return PermProbeResult{Status: "needs_perms", Unverified: permsUnverified(platform), Detail: detail}
 	default:
-		return PermProbeResult{Status: "unknown", Unverified: allPermsUnverified(),
+		return PermProbeResult{Status: "unknown", Unverified: permsUnverified(platform),
 			Detail: detail + ";无法据此判断权限状态,不进入 UI 开通流程"}
 	}
 }

@@ -164,7 +164,7 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 | 工具 | 作用 |
 |---|---|
-| `hub.onboard.status()` | 返回 `platforms` 全量清单（含 `credential_fields`、`dom_verified`、`app_list_verified` / `app_list_url`）及兼容字段 `supported` / `missing` / `configured`；能力清单从语义层矩阵动态生成 |
+| `hub.onboard.status()` | 返回 `platforms` 全量清单（含 `credential_fields`、`dom_verified`、`app_list_verified` / `app_list_url`、`tabs_verified`）及兼容字段 `supported` / `missing` / `configured`；能力清单从语义层矩阵动态生成 |
 | `hub.onboard.start(platform)` | 起带调试端口的 Chrome 并打开该平台页面；**带状态感知**，已登录且已停在详情页时不再列扫码建应用，已登录但未进详情时**自动打开/激活应用列表页**（无需用户点「应用开发」） |
 | `hub.onboard.watch(platform)` | 只读轮询 CDP 标签 URL，按各平台声明的登录域与详情页特征判定进度 |
 | `hub.onboard.setup(platform, app_name?, confirmed?)` | **推荐入口**：按平台声明式跑「打开/创建应用 → 抓凭据 → 权限 → 发布」，各阶段独立；腾讯文档授权页即凭据页，无需创建/权限/发布 |
@@ -176,8 +176,8 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 **三个层次，逐层降级**：
 
 1. **L1 凭据兜底**（`set_credentials`）：不依赖任何 DOM，四平台通用；真连校验失败一律不写盘，回复里不回显凭据值。任何页面选择器失败都降级到这里，永不要求用户切终端。
-2. **L2 浏览器抓取**：四平台的 `collect-creds` 都挂了声明式动作。飞书按实测 DOM 读 `.secret-code__code`；钉钉/企微/腾讯文档用 `readPage` + 正则从整页可见文本抽取（零 class 依赖），抽不到按 `next` 降级 L1。
-3. **L3 全链路**（`setup`）：`platformStages(p)` 按平台提供权限/发布 Ops，`Portal.Flow` 区分应用控制台与 Token 授权页，`createAppAction` 按 `create-*` 前缀匹配。`platforms[].dom_verified` **如实标注**：只有飞书的 Ops 在真实后台完整校准过，其余三个按可见文本声明、未经真机实测，`selector_miss` 时降级 L1，不静默重试提交。`app_list_verified` 是独立的一档：钉钉的**应用列表页 URL、行选择器与详情页 URL** 已真机实测，但创建/权限/发布表单仍未实测，两者不能混为一谈。
+2. **L2 浏览器抓取**：四平台的 `collect-creds` 都挂了声明式动作。飞书按实测 DOM 读 `.secret-code__code`；钉钉的详情页是单页多 tab（`CredTab` / `CredTabFragment` 声明），会**先点「凭证与基础信息」切到 `/baseinfo`** 再用 `readPage` + 正则抽取（零 class 依赖），企微/腾讯文档直接读整页文本。钉钉 `/baseinfo` 实测：`Client ID` 明文可读，`Client Secret` 只显示 `当前使用:xxxx****xxxx` 掩码、平台不提供明文，掩码交由格式校验拒绝后按 `next` 降级 L1（只需用户补 Secret），**绝不把掩码写进 `.env`**。
+3. **L3 全链路**（`setup`）：`platformStages(p)` 按平台提供权限/发布 Ops，`Portal.Flow` 区分应用控制台与 Token 授权页，`createAppAction` 按 `create-*` 前缀匹配。`platforms[].dom_verified` **如实标注**：只有飞书的 Ops 在真实后台完整校准过。`app_list_verified`（列表页 URL / 行选择器）与 `tabs_verified`（详情页 `/baseinfo` / `/permission` / `/version` 三个 tab 的导航与幂等文本）是两档独立标记，钉钉均为 true，但**创建/权限/发布表单仍未实测**，三者不能混为一谈。未校准且有不可逆副作用的阶段用 `ApplyNote` 显式返回 `not_required`（只读核对、不自动提交），不再伪装成 `done` 或反复 `selector_miss`。
 
 `start` 会先跑一次 `watch`：若已停在应用详情页，返回 `phase=ready_to_capture`、`manual_steps=[]`，并跳过开新标签，直接引导 Agent 调 `setup`——避免「人已经登录了还让我扫码建应用」。仅 `waiting_login` 时才列出登录步骤。四平台的登录域与详情页特征由 `Portal.LoginHosts` / `CredPages` / `AppIDRe` 声明，判定统一收敛在 `portalDetailMatch`，不再把飞书的 `/app/<appId>` 硬编码成通用规则。
 
@@ -187,7 +187,7 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **飞书权限 API 优先**（2026-11-09 实测踩坑后调整）：先用只读探针 `GET /open-apis/im/v1/chats?page_size=1` 判断能力是否可用——通了返回 `api_verified` 并**跳过整个 UI 开通流程**，既避开「点不到菜单就报失败」，也避免权限已开通时重复提交；无法确认（`unknown` / `no_credentials`）同样跳过 UI、标 `skipped` 且不做任何变更；只有平台明确返回权限不足（`needs_perms`）才进 UI 开通。`perm_probe` 如实区分 `checked`（仅群列表读权限）与 `unverified`（`im:message` 发消息、`bitable:app` 多维表格），**不把单个 API 调通等同于三个 scope 全部已开通**。钉钉/企微没有等价的权限校验 API，改为走页面只读探测（点菜单 + `readPage`）做幂等检测，由 `Done(text)` 判断是否已开通，不会被 `unsupported` 探针短路成永久跳过。
 
-**各阶段独立**：单阶段 `selector_miss` 只记它自己的失败并继续跑下一阶段（旧版遇第一个失败就整体 `return`，导致 `publish` 根本没执行，却被误读成「平台侧原本已完成」）；`phase=partial` 会列出失败阶段，`phase=done` 时若存在 `skipped` 阶段也会在 `next` 里明确提示未验证项。发布阶段仍先跑只读 `probe`（等菜单渲染 + `readPage`）做幂等检测，页面已显示「当前修改均已发布」返回 `already_done` 跳过。UI 点击的选择器与 `inspect` 候选采集**共用同一份标签集合**（含 `button` / `[role=button]` / `[role=tab]`），并先 `waitVisible` 等菜单文本出现再点，匹配放宽为允许数字角标；`candidates` 现在带标签/role，现场即可定位是哪种元素。凭据阶段非 `done` 一律计入 failed，不会被后续阶段的成功「洗」成整体 `done`。四平台都定义了创建/权限/发布或等价动作，`status` 的 `dom_verified` 标明是否经过真机校准，失败一律降级 `set_credentials`。
+**各阶段独立**：单阶段 `selector_miss` 只记它自己的失败并继续跑下一阶段（旧版遇第一个失败就整体 `return`，导致 `publish` 根本没执行，却被误读成「平台侧原本已完成」）；`phase=partial` 会列出失败阶段，`phase=done` 时若存在 `skipped` / `not_required` 阶段也会在 `next` 里明确提示未验证项。钉钉的权限/版本阶段按真机文本做幂等检测（`/version` 出现「版本状态 + 已上线」、`/permission` 无「未开通」即 `already_done`），未达成时返回 `not_required` 并附原因——权限是逐行「立即开通」、版本按钮是「创建新版本」，表单未校准，不自动提交。`perm_probe.unverified` 按平台返回各自的 `Perms`，不再把飞书的 `im:message` / `im:chat` / `bitable:app` 串到钉钉。发布阶段仍先跑只读 `probe`（等菜单渲染 + `readPage`）做幂等检测，页面已显示「当前修改均已发布」返回 `already_done` 跳过。UI 点击的选择器与 `inspect` 候选采集**共用同一份标签集合**（含 `button` / `[role=button]` / `[role=tab]`），并先 `waitVisible` 等菜单文本出现再点，匹配放宽为允许数字角标；`candidates` 现在带标签/role，现场即可定位是哪种元素。凭据阶段非 `done` 一律计入 failed，不会被后续阶段的成功「洗」成整体 `done`。四平台都定义了创建/权限/发布或等价动作，`status` 的 `dom_verified` 标明是否经过真机校准，失败一律降级 `set_credentials`。
 
 浏览器执行器的所有操作均有界超时（单步 6s、会话 25s）：`waitVisible` 不再用无超时的 `MustElement` 无限重试；`NewBrowserExecutor` 复用已有标签而非无条件新建 `about:blank`，不会再留下空白页签。`capture` 还会跳过标为 `Scope: "list"` 的步骤（如等 `app-card`），因此在详情页调用时不会卡在「正在执行中」。
 
@@ -198,6 +198,8 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 **浏览器执行器同样按平台绑定标签**（2026-11-11 第二轮实测）：`NewBrowserExecutor` 原先取 `MustPages()` 里第一个真实标签，多标签时创建表单 / `inspect` / `readPage` 会跑在上一次接入的飞书页面上，表现为 `selector_miss` 且 candidates 全是飞书元素。现在 `NewBrowserExecutorForPlatform` + `pickPlatformPage` 按「本平台详情页 > 本平台应用列表页 > 本平台非登录页 > 登录页」选择并激活，找不到该平台标签就直接降级而不是在别的平台页面上执行动作；`inspect` 也不再忽略定位失败去 dump 飞书页面。
 
 **应用列表页自动导航**（2026-11-11 第三轮真机实测）：开放平台入口页通常不渲染应用列表（钉钉 `?hash=%23%2F#/` 只有 3 个文档链接），停在入口页会把「读不到应用链接」误判成「企业里没有应用」。钉钉三段 URL 实测为：入口页 `?hash=%23%2F#/` → 列表页 `/fe/app?hash=...#/corp/app`（可直接导航，登录态在同一持久化 profile 内保留）→ 详情页 `/fe/ai?...#/app/<uuid>/dev`。`Portal.AppListURL` / `AppListMarkers` / `AppListRowSelector` 声明这三层，`ensureAppListTab` 用 CDP 幂等打开/激活列表页（短轮询 + 记住刚创建的标签 ID，避免连续 `start` 堆重复标签），`listExistingApps` 读 `tr[data-row-key] h5[title]` 行作为「已有应用」证据并返回 `NeedsClick`，`clickAppRow` 纯导航点击进入详情。`listVerified=false` 时 `setup` 返回 `page_loading` 而非创建清单，杜绝误建。详情页 URL 判定改用实测的 `#/app/<uuid>` + `/fe/ai`，并把 `/fe/app` 加入排除段，列表页不再被当成详情页。
+
+**详情 tab 自动切换**（2026-11-11 第四轮真机实测）：钉钉点进应用默认停在 `/permission`，而旧版 `capture` 与 setup 阶段共用「当前页面」、各自假设已在自己的 tab，于是出现「抓凭据 `capture_failed`（AppKey 正则未匹配）、开权限第 3 步找不到确定/提交、发布找不到创建版本」三个连续失败。实测三段 hash 为 `/baseinfo`（`应用凭证` / `Client ID` 明文 / `Client Secret` 掩码）、`/permission`（`权限点code` / 英文 scope / `未开通` / `立即开通` / `批量申请`）、`/version`（`创建新版本` / `版本状态` / `1.0.0 已上线`）。现在 `collect-creds` 与两个 stage 的 probe 都先点自己的菜单并 `waitVisible(body)` 等 SPA 渲染，再 `readPage` 做幂等检测；`Done(text)` 使用真实状态文本，不再用飞书式权限名或「已发布」猜测。已上线应用会直接 `already_done`，不产生任何企业记录。
 
 四平台凭据配置有交互式向导，含真连校验：
 

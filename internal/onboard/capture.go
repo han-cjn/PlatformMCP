@@ -118,7 +118,16 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 	if ce != nil {
 		res.Phase = capturePhase(ce.Phase)
 		res.Message = ce.Message
-		res.Next = captureNext(res.Phase)
+		// 只回传「哪些字段已从页面成功读到」的键名,绝不回传值。
+		// 钉钉 /baseinfo 能读到 Client ID 明文,但 Client Secret 只有掩码,
+		// 让 Agent 明确知道只差一项,而不是笼统报 capture_failed。
+		for _, c := range PortalCreds[platform] {
+			v := strings.TrimSpace(env[c.EnvKey])
+			if v != "" && (c.Format == nil || c.Format(v) == nil) {
+				res.Collected = append(res.Collected, c.EnvKey)
+			}
+		}
+		res.Next = captureNext(res.Phase, platform)
 		return res, nil
 	}
 	res.Collected = collected
@@ -145,10 +154,22 @@ func capturePhase(phase string) string {
 	}
 }
 
-func captureNext(phase string) string {
+// captureNext 的 platform 为可选参数:历史调用点只传 phase,新增的
+// 钉钉专属降级说明通过第二个参数启用。
+func captureNext(phase string, platform ...string) string {
+	p := ""
+	if len(platform) > 0 {
+		p = platform[0]
+	}
 	switch phase {
 	case "incomplete":
-		return "页面读取到的值缺失、疑似掩码或格式不符;刷新详情页后重试 hub.onboard.capture," +
+		if p == "dingtalk" {
+			return "钉钉「凭证与基础信息」页的 Client ID 是明文(见 collected),但 Client Secret 只显示掩码" +
+				"(实测 当前使用:xxxx****xxxx),平台不提供明文,纯 DOM 无法抓取;已拒绝把掩码写入 .env。" +
+				"请用表单只向用户索取 Client Secret,把 Client ID 与 Secret 一起交给 hub.onboard.set_credentials" +
+				"完成格式校验→真连校验→写 .env→热重载;不要在回复里回显任何凭据值"
+		}
+		return "页面读取到的值缺失、疑似掩码或格式不符;" +
 			"或改用 hub.onboard.set_credentials 由 Agent 收集凭据(零 DOM 依赖,四平台通用)"
 	case "verify_failed":
 		return "凭据被平台拒绝或平台不可达,未写入 .env;核对后重试 hub.onboard.capture,或改用 hub.onboard.set_credentials"

@@ -14,9 +14,10 @@ var defaultPerms = []string{"im:message", "im:chat", "bitable:app"}
 // Probe 部分的 Ops 只读(点菜单 + 读页面文本),用来做幂等检测;
 // Apply 部分才会产生真实副作用(开通权限 / 提交版本),必须经 confirmed 门。
 type setupStage struct {
-	ID     string
-	Action *BrowserAction
-	Done   func(pageText string) bool
+	ID        string
+	Action    *BrowserAction
+	Done      func(pageText string) bool
+	ApplyNote string // 非空:probe 后不执行任何 apply,原因如实回传(not_required),避免未校准的不可逆动作
 }
 
 // SetupResult 是 hub.onboard.setup 的返回:把「点进应用 → 创建应用 → 抓凭据 →
@@ -171,8 +172,8 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 		"请调 hub.health 确认 credentials=true / mounted=true。already_done=平台侧原本已完成;" +
 		"api_verified=权限 API 探针已通过、跳过 UI 开通;skipped=未能自动确认、未做任何变更"
 	if len(skipped) > 0 {
-		res.Next += "。注意以下阶段为跳过(未自动确认): " + strings.Join(skipped, "、") +
-			",详见对应 step.message,不要用 done 覆盖这些未验证项"
+		res.Next += "。注意以下阶段为跳过/只读核对(未自动确认、未产生企业记录): " + strings.Join(skipped, "、") +
+			",详见对应 step.message(status=not_required 表示该平台动作未真机校准,刻意不自动提交),不要用 done 覆盖这些未验证项"
 	}
 	return res, nil
 }
@@ -196,11 +197,23 @@ func setupPlan(p *Portal, appName string, needCreate bool) []string {
 		plan = append(plan, "创建应用「"+appName+"」(企业内真实产生且不可撤销;当前页面未检测到已有应用,请先核对避免重复创建)")
 	}
 	plan = append(plan, "自动打开应用详情页(无需用户点击)", readLine)
+	stages := platformStages(p)
 	if len(p.Perms) > 0 {
-		plan = append(plan, "开通权限: "+strings.Join(p.Perms, ", ")+"(已开通则跳过)")
+		label := "开通权限: "
+		for _, s := range stages {
+			if s.ID == "enable_perms" && s.ApplyNote != "" {
+				label = "核对权限(只读,不自动开通): "
+			}
+		}
+		plan = append(plan, label+strings.Join(p.Perms, ", ")+"(已开通则跳过)")
 	}
-	for _, s := range platformStages(p) {
-		if s.ID == "publish" {
+	for _, s := range stages {
+		if s.ID != "publish" {
+			continue
+		}
+		if s.ApplyNote != "" {
+			plan = append(plan, "核对版本发布状态(已发布则跳过;不自动创建版本)")
+		} else {
 			plan = append(plan, "创建版本 1.0.0 并申请发布(检测到已发布则跳过)")
 		}
 	}
@@ -305,7 +318,7 @@ func setupStageOutcomes(steps []SetupStep) (failed, skipped []string) {
 		switch s.Status {
 		case "selector_miss", "browser_missing", "waiting_app_detail", "waiting_login", "page_loading":
 			failed = append(failed, s.ID)
-		case "skipped", "unsupported":
+		case "skipped", "unsupported", "not_required":
 			skipped = append(skipped, s.ID)
 		}
 	}
@@ -358,6 +371,11 @@ func runSetupStage(stage setupStage, p *Portal, probe *PermProbeResult) (SetupSt
 		return SetupStep{ID: stage.ID, Status: "already_done"}, nil
 	}
 
+	// 阶段未达成时,若平台明确声明「不做自动 apply」(钉钉权限/版本),
+	// 如实返回 not_required + 原因,绝不用未校准的选择器去点不可逆按钮。
+	if stage.ApplyNote != "" {
+		return SetupStep{ID: stage.ID, Status: "not_required", Message: stage.ApplyNote}, nil
+	}
 	apply := opsForScope(stage.Action, "apply")
 	if len(apply) == 0 {
 		return SetupStep{ID: stage.ID, Status: "unsupported"}, nil

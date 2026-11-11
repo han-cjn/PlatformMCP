@@ -208,13 +208,13 @@
 
 当用户提到「接入」「配置平台」「添加集成」「setup」时:
 
-1. 先调用 `hub.onboard.status`。它返回 `platforms`——**项目支持的全部平台**(能力清单从语义层能力矩阵动态生成),每项带 `id` / `name` / `credentials` / `setup_supported` / `browser_capture` / `dom_verified` / `app_list_verified` / `app_list_url` / `capabilities` / `credential_fields` / `hint`
+1. 先调用 `hub.onboard.status`。它返回 `platforms`——**项目支持的全部平台**(能力清单从语义层能力矩阵动态生成),每项带 `id` / `name` / `credentials` / `setup_supported` / `browser_capture` / `dom_verified` / `app_list_verified` / `app_list_url` / `tabs_verified` / `capabilities` / `credential_fields` / `hint`
 2. **用选择框把 `platforms` 全量列出让用户挑选**,不要只列 `missing`,也不要自己编平台清单:
-   - 每项展示中文名 + 凭据状态(已配置 / 待接入) + 是否支持自动接入 + `dom_verified`(Ops 是否真机校准) + `app_list_verified`(应用列表页是否真机实测) + 可用能力
+   - 每项展示中文名 + 凭据状态(已配置 / 待接入) + 是否支持自动接入 + `dom_verified`(创建/权限/发布表单是否真机校准) + `app_list_verified`(应用列表页是否实测) + `tabs_verified`(详情 tab 导航是否实测) + 可用能力
    - **四个平台都支持自动接入**;`dom_verified=false` 的平台(钉钉/企微/腾讯文档)按可见文本声明动作,
      未经真机实测,若返回 `selector_miss` 属预期,按 `next` 降级 `set_credentials`,不要当成崩溃
-   - 钉钉 `app_list_verified=true`:应用列表页 URL / 行选择器 / 详情页 URL 已实测,
-     Agent 会**自动进入应用列表页并点进已有应用**;但创建/权限/发布表单仍未实测,两者不要混为一谈
+   - 钉钉 `app_list_verified=true` / `tabs_verified=true`:应用列表页、详情页 URL 与 `/baseinfo` / `/permission` / `/version` 三个 tab 已实测,
+     Agent 会**自动进入应用列表页、点进已有应用并切到对应 tab**;但创建/权限/发布**表单**仍未实测,这几档标记不要混为一谈
    - **已配置的平台也要列出**(用户可能想重新接入、重新体检或切换)
    - 选中项的 `id` 作为后续所有工具的 `platform` 参数
    - 只有用户明确说"不接入"时才结束;不要因为 `missing` 为空就跳过选择框
@@ -246,6 +246,13 @@
      需要确认时可让用户实际发一条消息或建一张表来实测
    - `steps` 里出现 `skipped` → 权限探针未能确认(无凭据/网络异常),工具**没有做任何变更**,
      按 `step.message` 如实告知,不要当成失败也不要当成完成
+   - `steps[].status=not_required` → 工具**只读核对**了该阶段(钉钉权限/版本表单未真机校准,
+     自动点会造成不可逆企业记录),刻意不提交。按 `step.message` 如实转述「未自动执行」,
+     **不要说已开通/已发布,也不要重试或让用户去点一遍按钮**;这类阶段计入 skipped,不算失败
+   - `capture` 返回 `phase=incomplete` 且 `collected` 含 `DINGTALK_Client_ID` →
+     钉钉后台的 `Client Secret` 只显示掩码(平台不提供明文),工具已拒绝把掩码写进 `.env`,
+     这是**预期降级不是崩溃**。按 `next` 用表单只向用户索取 `DINGTALK_Client_Secret`,
+     连同 `DINGTALK_Client_ID` 一起交给 `set_credentials`;不要在回复里回显任何值
    - `phase=partial` → **只有列在 `next` 里的阶段未自动完成,其他阶段已独立跑完**,
      不要整体重跑。调用 `hub.onboard.inspect` 拿候选(带标签/role)与 `candidates` 一起转述,
      **绝不自动重试提交表单**
@@ -280,9 +287,12 @@
 **边界说明**:
 
 - 登录(扫码/验证码)与管理员审批**必须人工在浏览器里点**;
-  进入应用列表页、点进已有应用、创建应用、开通权限、版本发布**由 `hub.onboard.start` / `hub.onboard.setup` 按平台声明代做**(四平台全量),其中创建/权限/发布必须先经选择框显式确认。
+  进入应用列表页、点进已有应用、切换详情 tab、抓凭据**由 `hub.onboard.start` / `hub.onboard.setup` 代做**;
+  创建/权限/发布必须先经选择框显式确认,且**只有表单已真机校准的平台才会自动提交**。
   腾讯文档授权页即凭据页,没有创建/权限/发布环节;只有飞书的 Ops 在真实后台完整校准过(`dom_verified=true`),
-  钉钉的 `app_list_verified=true` 只代表列表页/详情页 URL 与行选择器实测过,不代表创建/权限/发布表单已校准
+  钉钉的 `app_list_verified=true` / `tabs_verified=true` 只代表列表页、详情页 URL 与三个 tab 的导航/幂等文本实测过,
+  **不代表创建/权限/发布表单已校准**(这些阶段返回 `not_required`,只读核对)。
+  钉钉 `Client Secret` 后台只显示掩码,平台不提供明文,必须由用户复制一次后走 `set_credentials`
 - `setup` 权限阶段先用 **API 只读探针**验证,已可用(`api_verified`)或无法确认(`skipped`)
   都跳过 UI 开通;发布阶段先做只读幂等检测,已完成就跳过。各阶段**独立执行**,
   单阶段未命中只停该阶段、不阻断后续阶段,且绝不重试提交表单,避免留下半提交状态
