@@ -69,8 +69,8 @@ func StartPlatform(platform string) (*StartResult, error) {
 		ChromePort:  chromeDebugPort,
 		ManualSteps: manualSteps(p),
 		Next: "请在打开的浏览器里完成登录(此步必须人工);随后轮询 hub.onboard.watch," +
-			"变成 logged_in 后立即调用 hub.onboard.setup 自动打开/创建应用、抓凭据→写 .env→" +
-			"热重载→开权限→发布版本(无需用户点进应用,无需在终端执行任何命令)",
+			"变成 logged_in 后立即调用 hub.onboard.setup(confirmed=false) 拿该平台动作清单," +
+			"用户确认后自动完成抓凭据→写 .env→热重载及适用的创建/权限/发布(无需用户点进应用,无需在终端执行任何命令)",
 	}
 
 	// 状态感知:用户可能早就登录了、甚至已经停在应用凭证页(调试 profile 长期
@@ -83,8 +83,8 @@ func StartPlatform(platform string) (*StartResult, error) {
 			res.Chrome = "already-running"
 			res.PageOpened = true // 目标页面已打开,不再新开标签干扰用户
 			res.ManualSteps = []string{}
-			res.Next = "检测到你已登录且已停在应用「凭证与基础信息」页,无需扫码、无需创建应用;" +
-				"请立即调用 hub.onboard.setup(confirmed=false) 拿动作清单,用户确认后重调完成抓凭据→写 .env→热重载→开权限→发布。" +
+			res.Next = "检测到你已登录且已停在凭据页,无需扫码、无需创建应用;" +
+				"请立即调用 hub.onboard.setup(confirmed=false) 拿该平台动作清单,用户确认后重调完成抓凭据→写 .env→热重载及适用的权限/发布。" +
 				"不要再提示用户登录、点应用或建应用;只需抓凭据时才用 hub.onboard.capture"
 			return res, nil
 		case w.LoginState == "logged_in":

@@ -31,9 +31,23 @@ func TestSupportedPlatformsFullList(t *testing.T) {
 	if !got[0].SetupSupported || !got[0].BrowserCapture {
 		t.Fatalf("feishu 应支持 setup 与浏览器抓凭据: %+v", got[0])
 	}
-	for _, p := range got[1:] {
-		if p.SetupSupported || p.BrowserCapture {
-			t.Fatalf("%s 不应被标为自动接入/浏览器抓凭据: %+v", p.ID, p)
+	// L2 之后四平台都挂了各自的浏览器凭据动作(browser_capture=true),
+	// 且每项都要给出 credential_fields 供 set_credentials 渲染表单。
+	for _, p := range got {
+		if !p.BrowserCapture {
+			t.Fatalf("%s 应支持浏览器抓凭据: %+v", p.ID, p)
+		}
+		if len(p.CredentialKeys) == 0 {
+			t.Fatalf("%s 缺少 credential_fields: %+v", p.ID, p)
+		}
+	}
+	// L3 后 setup 链路四平台全量可用;dom_verified 只对真机校准过的飞书为真。
+	for _, p := range got {
+		if !p.SetupSupported {
+			t.Fatalf("%s 的 setup 链路应可用: %+v", p.ID, p)
+		}
+		if p.DomVerified != (p.ID == "feishu") {
+			t.Fatalf("%s 的 dom_verified 不实: %+v", p.ID, p)
 		}
 	}
 }

@@ -205,9 +205,11 @@
 
 当用户提到「接入」「配置平台」「添加集成」「setup」时:
 
-1. 先调用 `hub.onboard.status`。它返回 `platforms`——**项目支持的全部平台**(能力清单从语义层能力矩阵动态生成),每项带 `id` / `name` / `credentials` / `setup_supported` / `browser_capture` / `capabilities` / `hint`
+1. 先调用 `hub.onboard.status`。它返回 `platforms`——**项目支持的全部平台**(能力清单从语义层能力矩阵动态生成),每项带 `id` / `name` / `credentials` / `setup_supported` / `browser_capture` / `dom_verified` / `capabilities` / `credential_fields` / `hint`
 2. **用选择框把 `platforms` 全量列出让用户挑选**,不要只列 `missing`,也不要自己编平台清单:
-   - 每项展示中文名 + 凭据状态(已配置 / 待接入) + 是否支持自动接入 + 可用能力
+   - 每项展示中文名 + 凭据状态(已配置 / 待接入) + 是否支持自动接入 + `dom_verified`(Ops 是否真机校准) + 可用能力
+   - **四个平台都支持自动接入**;`dom_verified=false` 的平台(钉钉/企微/腾讯文档)按可见文本声明动作,
+     未经真机实测,若返回 `selector_miss` 属预期,按 `next` 降级 `set_credentials`,不要当成崩溃
    - **已配置的平台也要列出**(用户可能想重新接入、重新体检或切换)
    - 选中项的 `id` 作为后续所有工具的 `platform` 参数
    - 只有用户明确说"不接入"时才结束;不要因为 `missing` 为空就跳过选择框
@@ -240,25 +242,40 @@
    - `phase=partial` → **只有列在 `next` 里的阶段未自动完成,其他阶段已独立跑完**,
      不要整体重跑。调用 `hub.onboard.inspect` 拿候选(带标签/role)与 `candidates` 一起转述,
      **绝不自动重试提交表单**
-   - `phase=unsupported`(非飞书) → 退回第 6 步只做 `capture`
+   - `phase=unsupported` → 该平台没有对应动作(如腾讯文档无需创建应用),**进第 6 步**用 `set_credentials` 收尾,不要转去 `capture`
+   - `steps[].status=selector_miss` 且 `dom_verified=false` → 属预期,用 `inspect` 校准或降级 `set_credentials`,绝不重复提交表单
    - `browser_missing` / `waiting_login` → 按 `next` 提示重试
-6. `hub.onboard.capture` 作为降级或单独抓凭据使用:读 App ID / Secret → 格式校验 →
-   真连校验 → 写 `.env` → 热重载,全程零终端交互。按 `phase` 处理:
+6. **`hub.onboard.set_credentials` 是零 DOM 依赖的通用兜底**(四平台通吃):
+   - 从 `status` 的 `platforms[].credential_fields` 取字段名(`env_key` / `label`),
+     用表单或选择框让用户粘贴平台后台复制的凭据,组装成 `values` 对象
+   - 工具内部完成格式校验 → 平台真连校验 → 写 `.env` → 热重载;**真连失败不写盘**
+   - `phase=done` → 调 `hub.health` 确认 `credentials=true / mounted=true`
+   - `phase=incomplete` → 按 `required` 补齐字段后重试
+   - `verify_failed` → 核对凭据所属应用/企业与平台可达性,不要把值写进 `.env`
+   - `reload_failed` → 凭据已写盘,提示禁用/启用 mcp-hub 连接器
+   - **绝不在回复里回显任何凭据值**
+   - `setup` / `capture` / `create_app` 返回 `unsupported`、`selector_miss` 或页面读取失败时,
+     一律降级到本工具,**不要让用户切终端**
+7. `hub.onboard.capture` 作为浏览器自动抓凭据(用户已在凭证页时)使用:读 App ID / Secret →
+   格式校验 → 真连校验 → 写 `.env` → 热重载,全程零终端交互。按 `phase` 处理:
    - `done` → 调 `hub.health` 确认
    - `waiting_login` / `waiting_app_detail` / `page_loading` → 按 `next` 提示继续轮询后重试
-   - 其他 phase → 转述 `message` 与 `next`,不要当成崩溃
-7. 只想单独建应用时才用 `hub.onboard.create_app`(`confirmed=false` 先返回 `need_confirmation`);
+   - 其他 phase → 转述 `message` 与 `next`,按 `next` 降级到 `set_credentials`,不要当成崩溃
+8. 只想单独建应用时才用 `hub.onboard.create_app`(`confirmed=false` 先返回 `need_confirmation`);
    `existing_apps` / `already_in_detail` / `selector_miss` 按 `next` 处理,**绝不重复提交创建表单**
-8. `missing` 为空时**仍按第 2 步弹出全量平台选择框**;用户表示无需改动后,
+9. `missing` 为空时**仍按第 2 步弹出全量平台选择框**;用户表示无需改动后,
    再告知"四个平台凭据均已配置"
 
 **边界说明**:
 
 - 登录(扫码/验证码)与管理员审批**必须人工在浏览器里点**;
-  点应用、创建应用、开通权限、版本发布**由 `hub.onboard.setup` 代做**,但必须先经选择框显式确认
+  点应用、创建应用、开通权限、版本发布**由 `hub.onboard.setup` 按平台声明代做**(四平台全量),但必须先经选择框显式确认。
+  腾讯文档授权页即凭据页,没有创建/权限/发布环节;只有飞书的 Ops 在真实后台校准过(`dom_verified=true`)
 - `setup` 权限阶段先用 **API 只读探针**验证,已可用(`api_verified`)或无法确认(`skipped`)
   都跳过 UI 开通;发布阶段先做只读幂等检测,已完成就跳过。各阶段**独立执行**,
   单阶段未命中只停该阶段、不阻断后续阶段,且绝不重试提交表单,避免留下半提交状态
+- `hub.onboard.set_credentials` 是零 DOM 依赖的兜底:任何平台、任何页面选择器失败,
+  都可用它把用户复制的凭据交给 Hub 完成接入,**永远不要让用户切终端**;回复里不回显凭据值
 - 以上接入工具都不读 stdin、不向 stdout 打印向导文本,stdio 宿主(无 TTY)下安全;
   浏览器操作全部有界超时,卡住会在数秒内返回 `selector_miss` 而不是一直"正在执行中"
 - **不要让用户切换到终端执行任何命令**

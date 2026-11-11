@@ -65,12 +65,8 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 	res := &SetupResult{
 		Platform: platform, Plan: []string{}, Steps: []SetupStep{}, Candidates: []string{},
 	}
-	if platform != "feishu" {
-		res.Phase = "unsupported"
-		res.Next = "当前仅 feishu 定义了创建/开权限/发布动作;其余平台请人工完成应用配置,再调用 hub.onboard.capture"
-		return res, nil
-	}
-
+	// 不再按平台硬编码分流:创建/权限/发布动作由 platformStages(p) 声明式提供,
+	// 凭据动作由 Portal.Steps 提供。新增平台只需补清单,不改编排器。
 	w, err := Watch(platform)
 	if err != nil {
 		return nil, err
@@ -97,11 +93,12 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 		return res, nil
 	}
 
-	needCreate := st.Status == "need_create_app"
+	// 只有清单里声明了 create-* 动作的平台才能代建应用;token_page 无需创建。
+	needCreate := st.Status == "need_create_app" && createAppAction(p) != nil
 	if !confirmed {
 		res.Phase = "need_confirmation"
-		res.Plan = setupPlan(appName, needCreate)
-		res.Next = "请用选择框让用户确认以上动作(尤其创建应用与发布版本会在企业里真实产生记录),确认后带 confirmed=true 重新调用 hub.onboard.setup"
+		res.Plan = setupPlan(p, appName, needCreate)
+		res.Next = "请用选择框让用户确认以上动作(创建应用、开通权限与发布版本等会在企业里真实产生记录),确认后带 confirmed=true 重新调用 hub.onboard.setup"
 		return res, nil
 	}
 
@@ -135,13 +132,13 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 		res.Steps = append(res.Steps, SetupStep{ID: "capture", Status: cap.Phase, Message: cap.Next})
 	}
 
-	// 阶段 4/5:权限与版本发布。
-	// 权限先走只读 API 探针(A),只有平台明确报「权限不足」才进 UI 开通流程。
+	// 阶段 4/5:按平台声明式执行权限与发布(platformStages)。
+	// 飞书的权限阶段先走只读 API 探针(A),其余平台走「点菜单 + readPage」幂等检测。
 	// 各阶段独立执行、独立记录(C):旧版遇第一个 selector_miss 就整体 return,
 	// 导致 enable_perms 失败时 publish 根本没被调用,却被误读成「平台侧已完成」。
 	probe := probePerms(platform)
 	res.PermProbe = &probe
-	for _, stage := range feishuSetupStages() {
+	for _, stage := range platformStages(p) {
 		step, candidates := runSetupStage(stage, p, &probe)
 		res.Steps = append(res.Steps, step)
 		if len(candidates) > 0 {
@@ -153,11 +150,16 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 		res.Phase = "partial"
 		res.Next = "以下阶段未自动完成: " + strings.Join(failed, "、") +
 			"。各阶段相互独立,已成功的阶段不会重跑;candidates 含页面候选元素(带标签/role)," +
-			"请调 hub.onboard.inspect 校准后只重试失败阶段,不要重复提交表单"
+			"请调 hub.onboard.inspect 校准后只重试失败阶段,不要重复提交表单。" +
+			"若失败的是凭据阶段,可改用 hub.onboard.set_credentials 零 DOM 收尾"
 		return res, nil
 	}
 	res.Phase = "done"
-	res.Next = "应用已自动打开/创建、凭据已写入并热重载;权限与版本发布阶段均已独立处理。" +
+	intro := "应用详情页已自动打开/创建、凭据已写入并热重载;权限与发布阶段均已独立处理。"
+	if len(platformStages(p)) == 0 {
+		intro = "凭据授权页已自动打开、凭据已写入并热重载;该平台无需创建应用/开权限/发布版本。"
+	}
+	res.Next = intro +
 		"请调 hub.health 确认 credentials=true / mounted=true。already_done=平台侧原本已完成;" +
 		"api_verified=权限 API 探针已通过、跳过 UI 开通;skipped=未能自动确认、未做任何变更"
 	if len(skipped) > 0 {
@@ -167,25 +169,50 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 	return res, nil
 }
 
-// setupPlan 生成确认门里要展示给用户的动作清单。
-func setupPlan(appName string, needCreate bool) []string {
+// setupPlan 按平台声明生成确认门里的动作清单:token_page 没有应用/版本概念,
+// app_console 平台按各自的 Perms 与 platformStages 列条目,不再硬编码飞书权限集。
+func setupPlan(p *Portal, appName string, needCreate bool) []string {
 	if appName == "" {
 		appName = defaultAppName
 	}
-	plan := []string{}
-	if needCreate {
-		plan = append(plan, "创建企业自建应用「"+appName+"」(企业内真实产生且不可撤销)")
+	labels := []string{}
+	for _, c := range PortalCreds[p.Name] {
+		labels = append(labels, c.Label)
 	}
-	return append(plan,
-		"自动打开应用详情页(无需用户点击)",
-		"读取 App ID / App Secret → 校验 → 写 .env → 热重载挂载",
-		"开通权限: "+strings.Join(defaultPerms, ", ")+"(已开通则跳过)",
-		"创建版本 1.0.0 并申请发布(检测到已发布则跳过)",
-	)
+	readLine := "读取 " + strings.Join(labels, " / ") + " → 格式校验 → 真连校验 → 写 .env → 热重载挂载"
+	plan := []string{}
+	if p.Flow == "token_page" {
+		return append(plan, "自动打开凭据授权页(无需用户点击)", readLine)
+	}
+	if needCreate {
+		plan = append(plan, "创建应用「"+appName+"」(企业内真实产生且不可撤销)")
+	}
+	plan = append(plan, "自动打开应用详情页(无需用户点击)", readLine)
+	if len(p.Perms) > 0 {
+		plan = append(plan, "开通权限: "+strings.Join(p.Perms, ", ")+"(已开通则跳过)")
+	}
+	for _, s := range platformStages(p) {
+		if s.ID == "publish" {
+			plan = append(plan, "创建版本 1.0.0 并申请发布(检测到已发布则跳过)")
+		}
+	}
+	return plan
 }
 
 // openAppForSetup 只读地定位应用详情页;列表为空时返回 need_create_app 交给上层代建。
 func openAppForSetup(p *Portal, w *WatchResult) (string, SetupStep) {
+	// token_page 平台(腾讯文档)的授权页本身就是凭据页:直接确保它已打开,
+	// 不去列应用、不触发创建,也不需要用户点击任何按钮。
+	if p.Flow == "token_page" {
+		if w.InAppDetail && w.DetailURL != "" {
+			return w.DetailURL, SetupStep{ID: "open_app", Status: "already_open"}
+		}
+		if !openDebugTab(p.URL) {
+			return "", SetupStep{ID: "open_app", Status: "browser_missing",
+				Message: "CDP 未能打开凭据授权页 " + p.URL}
+		}
+		return p.URL, SetupStep{ID: "open_app", Status: "done"}
+	}
 	if w.InAppDetail && w.DetailURL != "" {
 		return w.DetailURL, SetupStep{ID: "open_app", Status: "already_open"}
 	}
@@ -226,53 +253,7 @@ func absoluteAppURL(p *Portal, raw string) string {
 	return u.Scheme + "://" + u.Host + "/" + raw
 }
 
-// feishuSetupStages 权限与发布的声明式动作。选择器一律按可见文本匹配,
-// 不绑定易变的 class;未命中时由上层降级人工并回传候选元素。
-func feishuSetupStages() []setupStage {
-	return []setupStage{
-		{
-			ID: "enable_perms",
-			Action: &BrowserAction{Script: "feishu@2026-11-perms", Ops: []Op{
-				// 先等菜单文本渲染出来(SPA 异步),再点:旧版直接 click 会在页面刚加载时 6s 超时
-				{Kind: "waitVisible", Target: menuCandidateSelector, Match: "^\\s*权限管理(?:\\s*\\d+)?\\s*$", Scope: "probe"},
-				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*权限管理(?:\\s*\\d+)?\\s*$", Scope: "probe"},
-				{Kind: "readPage", Scope: "probe"},
-				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(开通权限|添加权限|申请权限|批量导入权限)\\s*$", Scope: "apply"},
-				{Kind: "fill", Target: "input[placeholder*='搜索'], input[type=text], textarea",
-					Text: strings.Join(defaultPerms, ", "), Scope: "apply"},
-				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(确定|确认|提交|开通)\\s*$", Scope: "apply"},
-			}},
-			Done: func(text string) bool {
-				for _, k := range defaultPerms {
-					if !strings.Contains(text, k) {
-						return false
-					}
-				}
-				return true
-			},
-		},
-		{
-			ID: "publish",
-			Action: &BrowserAction{Script: "feishu@2026-11-publish", Ops: []Op{
-				{Kind: "waitVisible", Target: menuCandidateSelector,
-					Match: "^\\s*(版本管理与发布|应用发布|版本管理)(?:\\s*\\d+)?\\s*$", Scope: "probe"},
-				{Kind: "click", Target: menuCandidateSelector,
-					Match: "^\\s*(版本管理与发布|应用发布|版本管理)(?:\\s*\\d+)?\\s*$", Scope: "probe"},
-				{Kind: "readPage", Scope: "probe"},
-				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(创建版本|新建版本)\\s*$", Scope: "apply"},
-				{Kind: "fill", Target: "input[placeholder*='版本'], input[type=text], textarea", Text: "1.0.0", Scope: "apply"},
-				{Kind: "fill", Target: "textarea, input[placeholder*='说明'], input[placeholder*='描述']",
-					Text: "mcp-hub 接入自动发布", Scope: "apply"},
-				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(保存|确定|提交)\\s*$", Scope: "apply"},
-				{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(申请发布|发布|提交发布)\\s*$", Scope: "apply"},
-			}},
-			Done: func(text string) bool {
-				// 飞书详情页/版本页在无需变更时会显示「当前修改均已发布」(见实测截图)
-				return strings.Contains(text, "当前修改均已发布") || strings.Contains(text, "已发布且生效")
-			},
-		},
-	}
-}
+// 各平台的声明式「权限 / 发布」阶段见 stages.go 的 platformStages(p)。
 
 func opsForScope(act *BrowserAction, scope string) []Op {
 	out := []Op{}
@@ -288,8 +269,16 @@ func opsForScope(act *BrowserAction, scope string) []Op {
 // 不会掩盖其他阶段的成功,也不会中断后续阶段(C)。抽成纯函数便于单测覆盖。
 func setupStageOutcomes(steps []SetupStep) (failed, skipped []string) {
 	for _, s := range steps {
+		// 凭据与创建阶段是接入的硬前提:任何非 done 状态都不能被后续阶段的
+		// 成功「洗」成整体 done(旧版汇总只认 selector_miss/browser_missing 的漏洞)。
+		if s.ID == "capture" || s.ID == "create_app" {
+			if s.Status != "done" {
+				failed = append(failed, s.ID)
+			}
+			continue
+		}
 		switch s.Status {
-		case "selector_miss", "browser_missing":
+		case "selector_miss", "browser_missing", "waiting_app_detail", "waiting_login", "page_loading":
 			failed = append(failed, s.ID)
 		case "skipped", "unsupported":
 			skipped = append(skipped, s.ID)
@@ -298,13 +287,23 @@ func setupStageOutcomes(steps []SetupStep) (failed, skipped []string) {
 	return failed, skipped
 }
 
+// apiProbeApplies 只有飞书的 enable_perms 阶段有只读 API 探针可用。
+// 抽成纯函数便于单测锁定「其他平台不会被 unsupported 探针短路」这一边界:
+// 它们没有权限校验 API,必须靠页面文本做幂等检测,不能一律 skipped。
+func apiProbeApplies(stageID, platform string, probe *PermProbeResult) bool {
+	return stageID == "enable_perms" && platform == "feishu" && probe != nil
+}
+
 // runSetupStage 先跑只读 probe 做幂等检测,未达成才跑有副作用的 apply。
 // 任一步失败立即停止并返回页面候选元素,绝不重试提交表单。
 //
 // enable_perms 阶段优先依据 API 探针短路(A):权限已可用或无法确认时不打开浏览器、
 // 不点任何按钮;只有 needs_perms(平台明确报权限不足)才进入 UI 开通流程。
 func runSetupStage(stage setupStage, p *Portal, probe *PermProbeResult) (SetupStep, []string) {
-	if stage.ID == "enable_perms" && probe != nil {
+	// 只有飞书实现了只读 API 权限探针。其他平台没有可调用的权限校验 API,
+	// 不能因 probe.status=unsupported 就整体 skipped(那样 UI 开通永远不执行),
+	// 改为走下面「点菜单 + readPage」的只读幂等检测,由 Done(text) 判断是否已开通。
+	if apiProbeApplies(stage.ID, p.Name, probe) {
 		switch probe.Status {
 		case "api_ready":
 			return SetupStep{ID: stage.ID, Status: "api_verified",
@@ -353,7 +352,7 @@ func focusDetailPage(bx *BrowserExecutor, p *Portal) bool {
 			if err != nil || info == nil {
 				continue
 			}
-			if matchURLPrefix(info.URL, p.URL, []string{"/app/list", "/app/create", "/app/search", "/login"}) {
+			if portalDetailMatch(p, info.URL) {
 				bx.page = pg
 				found = true
 				return

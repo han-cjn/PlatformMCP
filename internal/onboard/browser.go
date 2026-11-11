@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -262,6 +263,30 @@ func (bx *BrowserExecutor) runOp(op Op, creds map[string]string) error {
 			el := bx.page.Timeout(browserOpTimeout).MustElement("body")
 			bx.Collected["__page_text__"] = el.Timeout(browserOpTimeout).MustText()
 		})
+	case "extract": // 从 readPage 抓到的整页文本里按正则抽取凭据,不依赖任何易变的 DOM class
+		text := bx.Collected["__page_text__"]
+		if text == "" {
+			return fmt.Errorf("extract 必须先执行 readPage 采集页面文本")
+		}
+		re, err := regexp.Compile(op.Target)
+		if err != nil {
+			return fmt.Errorf("extract 正则非法 %q: %w", op.Target, err)
+		}
+		m := re.FindStringSubmatch(text)
+		if len(m) == 0 {
+			return fmt.Errorf("页面文本未匹配 /%s/,该平台可用 hub.onboard.inspect 校准,或改用 hub.onboard.set_credentials", op.Target)
+		}
+		val := strings.TrimSpace(m[0])
+		if len(m) > 1 {
+			val = strings.TrimSpace(m[1])
+		}
+		if val == "" {
+			return fmt.Errorf("页面文本匹配到空值 /%s/", op.Target)
+		}
+		if op.ExtractKey != "" {
+			bx.Collected[op.ExtractKey] = val
+		}
+		return nil
 	case "waitURL": // 等待并切换到 URL 前缀匹配的标签(点应用卡片会新开标签)
 		return bx.safe(func() {
 			deadline := time.Now().Add(browserWaitURLMax)

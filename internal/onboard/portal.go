@@ -30,6 +30,15 @@ type Portal struct {
 	URL      string
 	Steps    []Step
 	Validate func(env map[string]string) error // 真连校验(见 validate.go)
+
+	// ---- 平台差异(声明式,避免各工具里散落 if platform == "feishu") ----
+	// Flow: "app_console" = 应用控制台(有列表/详情/创建/权限/发布);
+	//       "token_page"  = 凭据直接展示在授权页(无应用概念,如腾讯文档 MCP Token)。
+	Flow       string         // app_console / token_page
+	CredPages  []string       // 详情页/凭据页 URL 前缀,任一命中即视为 in_app_detail
+	LoginHosts []string       // 登录页 host 片段,补充默认的 accounts.* 与 /login
+	AppIDRe    *regexp.Regexp // 从 URL 抽取应用/机器人 ID;nil 用默认 /app/<id>
+	Perms      []string       // 该平台需开通的权限(展示在 plan,也用于页面文本幂等检测)
 }
 
 // BrowserAction 浏览器执行器动作序列;Script 为选择器版本标记(平台改版只改数据)。
@@ -42,7 +51,7 @@ type BrowserAction struct {
 // 存入凭据收集结果(envKey)。Index 表示多匹配元素取第几个(0 起):飞书
 // Secret 的「显示」按钮是同 class 的第 2 个(第 1 个是复制)。
 type Op struct {
-	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / readPage / fill / screenshot
+	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / readPage / extract / fill / screenshot
 	Target      string   // CSS 选择器(支持逗号分隔的多候选)或 URL 前缀(navigate/waitURL)
 	Text        string   // fill 的输入内容;支持 "$env:KEY" 引用已收集凭据
 	ExtractKey  string   // readText 抽取到的值存入该 envKey
@@ -166,7 +175,11 @@ var Portals = map[string]*Portal{
 					},
 				}},
 		},
-		Validate: ValidateFeishu,
+		Flow:       "app_console",
+		CredPages:  []string{"/app/"},
+		LoginHosts: []string{"accounts.feishu.cn"},
+		Perms:      []string{"im:message", "im:chat", "bitable:app"},
+		Validate:   ValidateFeishu,
 	},
 	"dingtalk": {
 		Name:  "dingtalk",
@@ -177,14 +190,38 @@ var Portals = map[string]*Portal{
 			{ID: "create-app", Brief: "应用开发 → 创建企业内部应用(H5/小程序均可)", Detail: []string{
 				"进入「应用开发」→「企业内部开发」→ 创建应用",
 				"左侧「机器人配置」:消息接收模式选 Stream 模式(免公网)",
+			}, Browser: &BrowserAction{
+				Script: "dingtalk@2026-11-create",
+				Ops: []Op{
+					{Kind: "waitVisible", Target: menuCandidateSelector, Match: "^\\s*(创建应用|创建企业内部应用|立即创建)\\s*$"},
+					{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(创建应用|创建企业内部应用|立即创建)\\s*$"},
+					{Kind: "fill", Target: "input[placeholder*='名称'], [role=dialog] input[type=text], input[type=text]", Text: "$app_name"},
+					{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(确定|确认|提交|创建)\\s*$"},
+				},
 			}},
 			{ID: "enable-perms", Brief: "权限:通讯录只读 + 消息推送 + 相关 SmartForm", Detail: []string{
 				"历史踩坑:qyapi_addresslist_search 必须勾上,否则收不到群消息",
 			}},
+			// 选择器策略:钉钉后台是 SPA,不做 class 绑定。先 readPage 拿整页文本,
+			// 再用正则从「AppKey / AppSecret」标签附近抽取;任一未命中即降级
+			// hub.onboard.set_credentials,不静默重试、不猜 DOM。
 			{ID: "collect-creds", Brief: "凭证与基础信息:复制 AppKey / AppSecret", Cred: true,
-				URLs: []string{"https://open-dev.dingtalk.com/"}},
+				URLs: []string{"https://open-dev.dingtalk.com/"},
+				Browser: &BrowserAction{
+					Script: "dingtalk@2026-11-creds",
+					Ops: []Op{
+						{Kind: "readPage"},
+						{Kind: "extract", Target: `(?i)(?:AppKey|Client\s*ID|应用标识)[^\n]{0,80}?(ding[A-Za-z0-9]{6,})`, ExtractKey: "DINGTALK_Client_ID"},
+						{Kind: "extract", Target: `(?i)(?:AppSecret|Client\s*Secret|应用密钥)[^\n]{0,80}?([A-Za-z0-9_-]{16,})`, ExtractKey: "DINGTALK_Client_Secret"},
+					},
+				}},
 		},
-		Validate: ValidateDingTalk,
+		Flow:       "app_console",
+		CredPages:  []string{"/app/", "appId=", "/detail", "/baseinfo"},
+		LoginHosts: []string{"login.dingtalk.com", "accounts.dingtalk.com", "oapi.dingtalk.com"},
+		AppIDRe:    regexp.MustCompile(`(?:appId|app_id|clientId)=([A-Za-z0-9_-]{6,})`),
+		Perms:      []string{"通讯录只读", "消息推送", "SmartForm"},
+		Validate:   ValidateDingTalk,
 	},
 	"wecom": {
 		Name:  "wecom",
@@ -195,10 +232,31 @@ var Portals = map[string]*Portal{
 			{ID: "create-bot", Brief: "智能专区 → 智能机器人 → 创建(收发一体,长连接)", Detail: []string{
 				"创建后把机器人拉进目标群(此步人工)",
 				"备选:群机器人 webhook 只能发不能收,不推荐",
+			}, Browser: &BrowserAction{
+				Script: "wecom@2026-11-create",
+				Ops: []Op{
+					{Kind: "waitVisible", Target: menuCandidateSelector, Match: "^\\s*(创建机器人|创建智能机器人|新建机器人)\\s*$"},
+					{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(创建机器人|创建智能机器人|新建机器人)\\s*$"},
+					{Kind: "fill", Target: "input[placeholder*='名称'], [role=dialog] input[type=text], input[type=text]", Text: "$app_name"},
+					{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(确定|确认|提交|创建)\\s*$"},
+				},
 			}},
-			{ID: "collect-creds", Brief: "复制 Bot ID / Secret", Cred: true},
+			{ID: "collect-creds", Brief: "复制 Bot ID / Secret", Cred: true,
+				Browser: &BrowserAction{
+					Script: "wecom@2026-11-creds",
+					Ops: []Op{
+						{Kind: "readPage"},
+						{Kind: "extract", Target: `(?i)(?:Bot\s*ID|BotID|机器人\s*ID)[^\n]{0,80}?([A-Za-z0-9_-]{6,})`, ExtractKey: "WECOM_BOT_ID"},
+						{Kind: "extract", Target: `(?i)(?:Secret|密钥)[^\n]{0,80}?([A-Za-z0-9_-]{16,})`, ExtractKey: "WECOM_BOT_SECRET"},
+					},
+				}},
 		},
-		Validate: ValidateWeCom,
+		Flow:       "app_console",
+		CredPages:  []string{"/robot", "botid=", "/detail", "/baseinfo"},
+		LoginHosts: []string{"login.work.weixin.qq.com", "account.weixin.qq.com"},
+		AppIDRe:    regexp.MustCompile(`(?:botid|robot_id|robotid)=([A-Za-z0-9_-]{6,})`),
+		Perms:      []string{"收发消息"},
+		Validate:   ValidateWeCom,
 	},
 	"tencent-docs": {
 		Name:  "tencent-docs",
@@ -206,9 +264,22 @@ var Portals = map[string]*Portal{
 		URL:   "https://docs.qq.com/open/auth/mcp.html",
 		Steps: []Step{
 			{ID: "login", Brief: "打开授权页并登录(此步只能人工,Token 即登录态)", URLs: []string{"https://docs.qq.com/open/auth/mcp.html"}},
-			{ID: "collect-creds", Brief: "复制页面上的 MCP Token", Cred: true},
+			// 腾讯文档没有「应用/版本」概念,Token 直接展示在授权页;
+			// 因此该平台从登录到写盘可以完全无人工点击(除登录本身)。
+			{ID: "collect-creds", Brief: "复制页面上的 MCP Token", Cred: true,
+				Browser: &BrowserAction{
+					Script: "tencent-docs@2026-11-creds",
+					Ops: []Op{
+						{Kind: "readPage"},
+						{Kind: "extract", Target: `(?i)(?:Token|令牌|密钥)[^\n]{0,80}?([A-Za-z0-9_.-]{20,})`, ExtractKey: "TENCENT_DOCS_TOKEN"},
+					},
+				}},
 		},
-		Validate: ValidateTencentDocs,
+		Flow:       "token_page",
+		CredPages:  []string{"https://docs.qq.com/open/auth/mcp.html"},
+		LoginHosts: []string{"login.docs.qq.com", "ssl.ptlogin2.qq.com", "accounts.qq.com"},
+		Perms:      []string{},
+		Validate:   ValidateTencentDocs,
 	},
 }
 

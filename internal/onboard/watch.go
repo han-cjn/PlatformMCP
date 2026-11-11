@@ -53,9 +53,9 @@ func Watch(platform string) (*WatchResult, error) {
 	case res.LoginState == "waiting_login":
 		res.Next = "用户尚未完成扫码登录;继续轮询 hub.onboard.watch,检测到 logged_in 后自动往下走,不要催用户去终端执行命令"
 	case res.LoginState == "logged_in" && res.InAppDetail:
-		res.Next = "已登录且已进入应用详情页;立即调用 hub.onboard.setup 完成全链路(抓凭据→写 .env→热重载→开权限→发布);只需抓凭据时才用 hub.onboard.capture"
+		res.Next = "已登录且已进入凭据页;立即调用 hub.onboard.setup(confirmed=false) 拿该平台的动作清单,确认后自动完成抓凭据→写 .env→热重载→权限/发布(按 plan);只需抓凭据时才用 hub.onboard.capture"
 	case res.LoginState == "logged_in":
-		res.Next = "已登录;立即调用 hub.onboard.setup 自动打开/创建应用并完成后续配置,不要让用户自己点进应用。" +
+		res.Next = "已登录;立即调用 hub.onboard.setup(confirmed=false) 拿到该平台 plan,确认后自动打开/创建应用并完成后续配置,不要让用户自己点进应用。" +
 			"若下一次轮询变回 waiting_login,是登录页重定向刚完成,属正常,按新状态继续等待扫码"
 	default:
 		res.Next = "页面加载中或停在无关页面,尚未识别到登录页/开放平台页;继续轮询 hub.onboard.watch,状态明确后再继续"
@@ -94,17 +94,18 @@ func debugPages() ([]string, error) {
 // (扫码成功后原登录页有时不自动关闭,不能据此误判为未登录)。
 func classifyPages(p *Portal, pages []string) (state string, inDetail bool, detailURL string) {
 	targetHost := hostOf(p.URL)
-	excludes := []string{"/app/list", "/app/create", "/app/search", "/login"}
 	hasTarget, hasLogin := false, false
 	for _, u := range pages {
-		if isLoginPage(u) {
+		login := portalIsLoginPage(p, u)
+		if login {
 			hasLogin = true
 		}
-		if hostOf(u) == targetHost && !isLoginPage(u) {
+		if hostOf(u) == targetHost && !login {
 			hasTarget = true
 		}
-		// 详情页必须是 /app/<appId>/... 而非 /app?query=... 之类的假命中
-		if matchURLPrefix(u, p.URL, excludes) && strings.Contains(strings.TrimPrefix(u, p.URL), "/") {
+		// 各平台的详情页/凭据页特征统一在 portalDetailMatch 里声明,
+		// 不再把飞书的 /app/<appId> 模式硬编码成四平台通用规则。
+		if portalDetailMatch(p, u) {
 			inDetail = true
 			detailURL = u
 		}

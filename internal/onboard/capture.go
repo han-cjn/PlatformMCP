@@ -2,8 +2,6 @@ package onboard
 
 import (
 	"fmt"
-	"os"
-	"sort"
 	"strings"
 )
 
@@ -63,8 +61,8 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 	act := credAction(p)
 	if act == nil {
 		res.Phase = "unsupported"
-		res.Message = "该平台未定义浏览器凭据抓取动作"
-		res.Next = "该平台仍需在终端执行 go run ./cmd/hub -config config.json -onboard " + platform
+		res.Message = "该平台未定义(或未校准)浏览器凭据抓取动作"
+		res.Next = unsupportedCaptureNext()
 		return res, nil
 	}
 
@@ -86,7 +84,7 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 			if e != nil || info == nil {
 				continue
 			}
-			if matchURLPrefix(info.URL, p.URL, []string{"/app/list", "/app/create", "/app/search", "/login"}) {
+			if portalDetailMatch(p, info.URL) {
 				bx.page = pg
 				located = true
 				return
@@ -112,54 +110,55 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 		env[k] = strings.TrimSpace(v)
 	}
 
-	// 必需凭据齐全 + 格式校验通过才允许写盘
-	for _, c := range PortalCreds[platform] {
-		v := strings.TrimSpace(env[c.EnvKey])
-		if v == "" {
-			res.Phase = "incomplete"
-			res.Message = "未能读取 " + c.EnvKey
-			res.Next = "请在详情页展开该凭据后重试 hub.onboard.capture"
-			return res, nil
-		}
-		if c.Format != nil {
-			if err := c.Format(v); err != nil {
-				res.Phase = "incomplete"
-				res.Message = c.EnvKey + " 格式不符: " + err.Error()
-				res.Next = "页面读取到的值疑似掩码或占位文本,请刷新详情页后重试 hub.onboard.capture"
-				return res, nil
-			}
-		}
-		env[c.EnvKey] = v
-		res.Collected = append(res.Collected, c.EnvKey)
-	}
-	sort.Strings(res.Collected)
-
-	if err := p.Validate(env); err != nil {
-		res.Phase = "verify_failed"
-		res.Message = err.Error()
-		res.Next = "凭据被平台拒绝或平台不可达,未写入 .env;请核对后重试 hub.onboard.capture"
+	// 缺值/格式校验 → 真连校验 → 写 .env → 热重载,与 set_credentials 共用
+	// 同一份收尾逻辑,避免两条接入路径的校验规则漂移。
+	collected, ce := commitCredentials(platform, env, CredOptions{
+		EnvPath: ".env", Validate: p.Validate, Reload: reload,
+	})
+	if ce != nil {
+		res.Phase = capturePhase(ce.Phase)
+		res.Message = ce.Message
+		res.Next = captureNext(res.Phase)
 		return res, nil
 	}
-
-	if err := UpsertEnv(".env", env); err != nil {
-		res.Phase = "write_failed"
-		res.Message = err.Error()
-		return res, nil
-	}
-	for k, v := range env {
-		os.Setenv(k, v) // 让本进程后续逻辑与热重载直接用新值
-	}
-	if reload != nil {
-		if err := reload(env); err != nil {
-			res.Phase = "reload_failed"
-			res.Message = err.Error()
-			res.Next = "凭据已写入 .env,但热重载失败;在连接器页面禁用/启用 mcp-hub 即可生效"
-			return res, nil
-		}
-	}
+	res.Collected = collected
 	res.Phase = "done"
 	res.Next = "凭据已写入 .env 并完成热重载;调用 hub.onboard.setup 可自动完成权限开通与版本发布,之后即可调用 table.query 等能力"
 	return res, nil
+}
+
+// unsupportedCaptureNext 是浏览器抓取动作缺失时唯一的降级指引。
+// 旧版这里让用户「去终端跑 -onboard」,在 stdio 宿主下是死路:该向导需要 TTY。
+func unsupportedCaptureNext() string {
+	return "不要让用户切到终端。请调用 hub.onboard.status 取 platforms[].credential_fields," +
+		"用表单收集用户从平台后台复制的凭据,再调用 hub.onboard.set_credentials 完成格式校验→真连校验→写 .env→热重载(四平台通用、零 DOM 依赖)"
+}
+
+// capturePhase 把公共收尾的阶段映射到 CaptureResult 的历史 phase 枚举,
+// 保持 Agent 已有的分支处理逻辑不变。
+func capturePhase(phase string) string {
+	switch phase {
+	case "invalid_format":
+		return "incomplete"
+	default:
+		return phase
+	}
+}
+
+func captureNext(phase string) string {
+	switch phase {
+	case "incomplete":
+		return "页面读取到的值缺失、疑似掩码或格式不符;刷新详情页后重试 hub.onboard.capture," +
+			"或改用 hub.onboard.set_credentials 由 Agent 收集凭据(零 DOM 依赖,四平台通用)"
+	case "verify_failed":
+		return "凭据被平台拒绝或平台不可达,未写入 .env;核对后重试 hub.onboard.capture,或改用 hub.onboard.set_credentials"
+	case "write_failed":
+		return "写 .env 失败,检查工作目录写权限后重试 hub.onboard.capture"
+	case "reload_failed":
+		return "凭据已写入 .env,但热重载失败;在连接器页面禁用/启用 mcp-hub 即可生效"
+	default:
+		return "按 message 修正后重试,或改用 hub.onboard.set_credentials"
+	}
 }
 
 // captureOps 过滤掉会导走页面/长时间等待/落盘的 Ops。

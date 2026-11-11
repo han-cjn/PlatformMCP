@@ -74,7 +74,8 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 	act := createAppAction(p)
 	if act == nil {
 		res.Phase = "unsupported"
-		res.Next = "该平台未定义自动创建应用的浏览器动作;请在浏览器里人工创建应用并进入「凭证与基础信息」页,之后调用 hub.onboard.capture"
+		res.Next = "该平台未定义自动创建应用的浏览器动作;若已有应用,直接用 hub.onboard.status 取 platforms[].credential_fields 收集凭据并调用 hub.onboard.set_credentials 完成接入;" +
+			"若还没有应用,只需请用户在平台后台人工创建一次,再回到 set_credentials。浏览器抓取动作同样未定义,也不要让用户切终端"
 		return res, nil
 	}
 
@@ -99,7 +100,7 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 		// 幂等门 1:用户已经停在某个应用的详情页了,再建一个纯属浪费。
 		// 直接帮他收尾,这正是「人已登录并点进凭证页」场景下最该做的事。
 		res.Phase = "already_in_detail"
-		res.ExistingApps = []AppRef{{AppID: appIDFromURL(w.DetailURL), URL: w.DetailURL}}
+		res.ExistingApps = []AppRef{{AppID: portalAppID(p, w.DetailURL), URL: w.DetailURL}}
 		res.Capture, err = Capture(platform, reload)
 		if err != nil {
 			return nil, err
@@ -131,7 +132,7 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 		res.Phase = "need_confirmation"
 		res.Next = "创建应用会在企业里真实产生一个应用且不可撤销。请用选择框让用户确认应用名(默认 \"" +
 			appName + "\"),确认后带 confirmed=true 重新调用 hub.onboard.create_app。" +
-			"图标沿用平台默认;权限开通与版本发布仍需人工"
+			"图标沿用平台默认;权限开通与版本发布由 hub.onboard.setup 继续自动完成"
 		return res, nil
 	}
 
@@ -161,11 +162,11 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 		res.Message = "提交后 " + createAppURLWaitMax.String() + " 内未出现新的应用详情页"
 		res.Candidates = collectCandidates(bx)
 		res.Next = "可能触发了平台风控/二次确认,或表单未通过校验;请让用户在浏览器里核对并手动完成创建," +
-			"然后调用 hub.onboard.capture。不要重复提交创建表单"
+			"然后调用 hub.onboard.set_credentials 收尾(或 hub.onboard.capture 自动抓取)。不要重复提交创建表单"
 		return res, nil
 	}
 	res.CreatedURL = created
-	res.ExistingApps = []AppRef{{AppID: appIDFromURL(created), URL: created}}
+	res.ExistingApps = []AppRef{{AppID: portalAppID(p, created), URL: created}}
 
 	// 新应用已落到详情页,直接走既有收尾链路:抓凭据 → 校验 → 写 .env → 热重载。
 	res.Capture, err = Capture(platform, reload)
@@ -187,7 +188,9 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 // createAppAction 取清单中「创建应用」步骤的浏览器动作定义。
 func createAppAction(p *Portal) *BrowserAction {
 	for i := range p.Steps {
-		if p.Steps[i].ID == "create-app" && p.Steps[i].Browser != nil {
+		// create-app / create-bot 都是「代建应用」步骤,按前缀匹配让新平台
+		// 只需在清单里声明动作,不必改这里。
+		if strings.HasPrefix(p.Steps[i].ID, "create-") && p.Steps[i].Browser != nil {
 			return p.Steps[i].Browser
 		}
 	}
@@ -216,6 +219,10 @@ func createAppOps(act *BrowserAction, appName string) []Op {
 // 依据是详情页 URL 中的 /app/<appId> 模式(与 watch.classifyPages 同源),
 // 不依赖任何易变的 class。
 func listExistingApps(p *Portal) ([]AppRef, error) {
+	// token_page 平台没有「应用列表」概念,Setup 会直接打开授权页读凭据。
+	if p.Flow == "token_page" {
+		return []AppRef{}, nil
+	}
 	bx, err := NewBrowserExecutor("")
 	if err != nil {
 		return nil, err
@@ -225,7 +232,7 @@ func listExistingApps(p *Portal) ([]AppRef, error) {
 	var out []AppRef
 	seen := map[string]bool{}
 	add := func(raw, name string) {
-		id := appIDFromURL(raw)
+		id := portalAppID(p, raw)
 		if id == "" || seen[id] {
 			return
 		}
@@ -240,7 +247,7 @@ func listExistingApps(p *Portal) ([]AppRef, error) {
 				continue
 			}
 			// 已打开的详情页本身就是「已有应用」的铁证
-			if matchURLPrefix(info.URL, p.URL, []string{"/app/list", "/app/create", "/app/search", "/login"}) {
+			if portalDetailMatch(p, info.URL) {
 				add(info.URL, "")
 			}
 			if hostOf(info.URL) != hostOf(p.URL) {
@@ -255,7 +262,7 @@ func listExistingApps(p *Portal) ([]AppRef, error) {
 				if href == nil || *href == "" {
 					continue
 				}
-				if appIDFromURL(*href) == "" {
+				if portalAppID(p, *href) == "" {
 					continue
 				}
 				add(*href, el.MustText())
@@ -355,7 +362,7 @@ func waitForNewDetail(p *Portal, before map[string]bool) string {
 		pages, err := debugPages()
 		if err == nil {
 			for _, u := range pages {
-				if !before[u] && matchURLPrefix(u, p.URL, []string{"/app/list", "/app/create", "/app/search", "/login"}) {
+				if !before[u] && portalDetailMatch(p, u) {
 					return u
 				}
 			}

@@ -134,10 +134,22 @@ func main() {
 		return mcp.NewToolResultText(string(out)), nil
 	})
 
+	// 所有接入工具共用的凭据热重载回调:写盘后重新 Load 配置并挂载该平台,
+	// 同时把健康状态里的 credentials 置真。集中定义避免多处闭包漂移。
+	reloadCreds := func(platform string) func(map[string]string) error {
+		return func(map[string]string) error {
+			if err := reloadPlatform(ctx, platform, *configPath, mgr); err != nil {
+				return err
+			}
+			hr.SetCredentials(platform, true)
+			return nil
+		}
+	}
+
 	// 接入引导:返回项目支持的全部平台清单,供 Agent 在选择框里全量列出(不只列 missing)。
 	// capabilities 从语义层能力矩阵动态生成,新增能力/平台时无需改这里。
 	hub.AddTool(mcp.NewTool("hub.onboard.status",
-		mcp.WithDescription("返回项目支持的全部平台及各平台凭据状态。platforms 是全量清单,每项含 id/name/title/credentials(configured|missing)/setup_supported/browser_capture/capabilities/hint;用户表达接入意图时先调此工具,然后用选择框把 platforms 全量列出让用户挑选(不要只列 missing,已配置的平台也要列,用户可能想重新接入或体检),选中项用 id 传给后续工具。supported 为 id 列表,missing/configured 为兼容旧流程的状态分组"),
+		mcp.WithDescription("返回项目支持的全部平台及各平台凭据状态。platforms 是全量清单,每项含 id/name/title/credentials(configured|missing)/setup_supported/browser_capture/dom_verified/capabilities/credential_fields/hint;dom_verified=false 表示该平台声明式 Ops 未在真实后台校准,失败时降级 set_credentials;用户表达接入意图时先调此工具,然后用选择框把 platforms 全量列出让用户挑选(不要只列 missing,已配置的平台也要列,用户可能想重新接入或体检),选中项用 id 传给后续工具。supported 为 id 列表,missing/configured 为兼容旧流程的状态分组;每项还含 credential_fields(env_key/label),供 hub.onboard.set_credentials 渲染表单"),
 	), func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		capsByPlatform := map[string][]string{}
 		for _, c := range semantic.BuiltinCatalog().All() {
@@ -168,7 +180,7 @@ func main() {
 	// 开放平台页面。全程不读 stdin、不等人工输入,stdio 宿主(无 TTY)下同样安全;
 	// 登录/建应用/发布仍需人工,后续由 watch/capture 接管,不再要求用户去终端敲命令。
 	hub.AddTool(mcp.NewTool("hub.onboard.start",
-		mcp.WithDescription("启动指定平台的接入流程:自动启动带调试端口的 Chrome 并在其中打开该平台开放平台页面(浏览器会真的弹出)。用户选择要接入的平台后立即调用此工具,不要只把命令打印给用户。返回已完成的动作与后续人工步骤;登录/创建应用/发布必须人工完成"),
+		mcp.WithDescription("启动指定平台的接入流程:自动启动带调试端口的 Chrome 并在其中打开该平台开放平台页面(浏览器会真的弹出)。用户选择要接入的平台后立即调用此工具,不要只把命令打印给用户。返回已完成的动作与后续人工步骤;只有登录(扫码/验证码)与管理员审批必须人工,创建应用/开权限/发布由 hub.onboard.setup 自动完成"),
 		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单")),
 	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		res, err := onboard.StartPlatform(req.GetString("platform", ""))
@@ -195,16 +207,36 @@ func main() {
 
 	// 接入收尾:在 Hub 进程内完成凭据抓取→校验→写盘→热重载,零 TTY、零 stdout 输出。
 	hub.AddTool(mcp.NewTool("hub.onboard.capture",
-		mcp.WithDescription("自动完成接入收尾:从浏览器应用详情页读取 App ID/Secret → 格式校验 → 真连校验 → 写入 .env → 热重载挂载。全程无需终端、无需用户执行任何命令,替代 `go run ... -onboard <平台> -onboard-browser`。前置条件是用户已扫码登录并进入应用「凭证与基础信息」页;未满足时返回 waiting_login / waiting_app_detail 等 phase(不是错误),按 next 提示继续轮询或转述给用户"),
+		mcp.WithDescription("自动完成接入收尾:从浏览器应用详情页读取 App ID/Secret → 格式校验 → 真连校验 → 写入 .env → 热重载挂载。全程无需终端、无需用户执行任何命令,替代 `go run ... -onboard <平台> -onboard-browser`。四个平台均定义了凭据动作:应用控制台类从应用详情页读 App ID/Secret 或 AppKey/Secret,腾讯文档从授权页读取 MCP Token(整页文本正则抽取,零 DOM 选择器依赖)。前置条件是用户已登录并停在凭据页;未满足时返回 waiting_login / waiting_app_detail 等 phase(不是错误),按 next 提示继续轮询或转述给用户"),
 		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单")),
 	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		platform := req.GetString("platform", "")
-		res, err := onboard.Capture(platform, func(map[string]string) error {
-			if err := reloadPlatform(ctx, platform, *configPath, mgr); err != nil {
-				return err
+		res, err := onboard.Capture(platform, reloadCreds(platform))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := json.MarshalIndent(res, "", "  ")
+		return mcp.NewToolResultText(string(out)), nil
+	})
+
+	// 零 DOM 依赖的通用接入收尾:用户在平台后台复制凭据,Agent 用表单收集后交给 Hub,
+	// 四平台通吃。浏览器抓取/创建/发布失败时,这是永不需要用户切终端的兜底路径。
+	hub.AddTool(mcp.NewTool("hub.onboard.set_credentials",
+		mcp.WithDescription("零浏览器依赖的通用接入收尾:把用户从平台后台复制的凭据交给 Hub,按平台定义做格式校验 → 真连校验 → 写入 .env → 热重载挂载,四个平台全部通用。values 的键名见 hub.onboard.status 返回的 platforms[].credential_fields,或本工具返回 phase=incomplete 时的 required。真连校验不通过一律不写盘;不要在回复里回显任何凭据值。当 hub.onboard.setup / capture 返回 unsupported 或 selector_miss 时,改用本工具收集凭据即可完成接入,全程无需终端命令"),
+		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单")),
+		mcp.WithObject("values", mcp.Required(), mcp.Description("凭据键值对,键为该平台 credential_fields 里的 env_key,值为用户复制的原始凭据字符串")),
+	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		platform := req.GetString("platform", "")
+		values := map[string]string{}
+		if raw, ok := req.GetArguments()["values"].(map[string]any); ok {
+			for k, v := range raw {
+				if s, ok := v.(string); ok {
+					values[k] = s
+				}
 			}
-			hr.SetCredentials(platform, true)
-			return nil
+		}
+		res, err := onboard.SetCredentials(platform, values, onboard.CredOptions{
+			Reload: reloadCreds(platform),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -218,19 +250,13 @@ func main() {
 	// need_confirmation),未命中选择器时降级人工且不重试提交。
 	hub.AddTool(mcp.NewTool("hub.onboard.create_app",
 		mcp.WithDescription("代用户创建平台应用并自动完成接入:先幂等检查(已有应用或已停在应用详情页就不新建,直接走 capture),未确认时只返回 need_confirmation 让你用选择框征求同意;确认后自动填写应用名并提交创建表单、验证跳转,最后自动抓取凭据→写 .env→热重载。登录(扫码/验证码)仍需人工;权限开通与版本发布可继续调用 hub.onboard.setup 自动完成。返回 phase 按 need_confirmation / existing_apps / selector_miss / done 分别处理,不要重复提交创建表单"),
-		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单(当前仅 feishu 定义了创建动作)")),
+		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单(feishu/dingtalk/wecom 定义了创建动作;tencent-docs 无应用概念,返回 unsupported)")),
 		mcp.WithString("app_name", mcp.Description("应用名称,默认 mcp-hub;需用户确认后再传")),
 		mcp.WithBoolean("confirmed", mcp.Description("用户是否已通过选择框明确同意创建应用。为 true 才会真正提交表单,false 时仅返回 need_confirmation")),
 	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		platform := req.GetString("platform", "")
 		res, err := onboard.CreateApp(platform, req.GetString("app_name", ""), req.GetBool("confirmed", false),
-			func(map[string]string) error {
-				if err := reloadPlatform(ctx, platform, *configPath, mgr); err != nil {
-					return err
-				}
-				hr.SetCredentials(platform, true)
-				return nil
-			})
+			reloadCreds(platform))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -241,20 +267,14 @@ func main() {
 	// 接入全链路:自动点进应用 → 代建应用(如需) → 抓凭据 → 开权限 → 发布版本。
 	// 用户只做登录与一次选择框确认,其余由 Hub 在调试 Chrome 里代做。
 	hub.AddTool(mcp.NewTool("hub.onboard.setup",
-		mcp.WithDescription("端到端完成平台接入:自动打开或创建应用详情页、抓取 App ID/Secret 写入 .env 并热重载、用只读 API 探针验证权限(已可用则跳过 UI 开通)、创建版本并申请发布。用户只需在浏览器里登录并确认一次动作清单,无需手动点击应用、无需去终端执行命令。confirmed=false 只返回 plan,不产生任何变更;confirmed=true 后各阶段独立执行、独立返回状态(api_verified=API 探针通过并跳过 UI、already_done=平台侧原本已完成、skipped=未能自动确认且未做任何变更、selector_miss=需按 candidates 校准),单阶段失败不阻断后续阶段。perm_probe 明确区分已验证与未验证的 scope,不要把 api_verified 当成三个 scope 全部已开通。candidates 带元素标签/role,失败时调 hub.onboard.inspect 校准,不要重复调用提交。当前仅 feishu 支持;登录与管理员审批仍需人工"),
-		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单(当前仅 feishu 定义了配置与发布动作)")),
+		mcp.WithDescription("端到端完成平台接入:自动打开或创建应用详情页、抓取 App ID/Secret 写入 .env 并热重载、用只读 API 探针验证权限(已可用则跳过 UI 开通)、创建版本并申请发布。用户只需在浏览器里登录并确认一次动作清单,无需手动点击应用、无需去终端执行命令。confirmed=false 只返回 plan,不产生任何变更;confirmed=true 后各阶段独立执行、独立返回状态(api_verified=API 探针通过并跳过 UI、already_done=平台侧原本已完成、skipped=未能自动确认且未做任何变更、selector_miss=需按 candidates 校准),单阶段失败不阻断后续阶段。perm_probe 明确区分已验证与未验证的 scope,不要把 api_verified 当成三个 scope 全部已开通。candidates 带元素标签/role,失败时调 hub.onboard.inspect 校准,不要重复调用提交。四个平台均支持:飞书/钉钉/企业微信走「创建 → 抓凭据 → 开权限 → 发布」,腾讯文档授权页即凭据页、无需创建/权限/发布;status 的 dom_verified=false 表示该平台 Ops 未在真实后台校准,selector_miss 时降级 set_credentials。登录与管理员审批仍需人工"),
+		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单;配置与发布动作按平台声明式提供")),
 		mcp.WithString("app_name", mcp.Description("应用名称,默认 mcp-hub;仅列表为空需要创建时使用")),
 		mcp.WithBoolean("confirmed", mcp.Description("用户是否已通过选择框明确同意动作清单。true 才会创建应用/开通权限/提交版本,false 时只返回 plan")),
 	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		platform := req.GetString("platform", "")
 		res, err := onboard.Setup(platform, req.GetString("app_name", ""), req.GetBool("confirmed", false),
-			func(map[string]string) error {
-				if err := reloadPlatform(ctx, platform, *configPath, mgr); err != nil {
-					return err
-				}
-				hr.SetCredentials(platform, true)
-				return nil
-			})
+			reloadCreds(platform))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

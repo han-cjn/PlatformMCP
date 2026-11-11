@@ -5,26 +5,30 @@ import (
 	"testing"
 )
 
-// TestSetupUnsupportedPlatform 非飞书平台不定义配置/发布动作,应快速降级且不碰浏览器。
+// TestSetupUnsupportedPlatform L3 后四平台都有 setup 链路:无调试 Chrome 时
+// 应快速返回 browser_missing 而不是 unsupported,且不让用户切终端。
 func TestSetupUnsupportedPlatform(t *testing.T) {
 	res, err := Setup("dingtalk", "", false, nil)
 	if err != nil {
-		t.Fatalf("unsupported 不应报错: %v", err)
+		t.Fatalf("不应报错: %v", err)
 	}
-	if res.Phase != "unsupported" || !strings.Contains(res.Next, "capture") {
-		t.Fatalf("应降级为人工配置 + capture: %+v", res)
+	if res.Phase != "browser_missing" {
+		t.Fatalf("期望 browser_missing,实际 %+v", res)
+	}
+	if strings.Contains(res.Next, "go run") {
+		t.Fatalf("指引不应让用户切终端: %+v", res)
 	}
 }
 
 // TestSetupPlan 确认门必须把有副作用的动作(创建应用/发布版本/权限)明确列出来。
 func TestSetupPlan(t *testing.T) {
-	withCreate := strings.Join(setupPlan("", true), "|")
-	for _, want := range []string{"创建企业自建应用", defaultAppName, "im:message", "bitable:app", "1.0.0", "自动打开应用详情页"} {
+	withCreate := strings.Join(setupPlan(Portals["feishu"], "", true), "|")
+	for _, want := range []string{"创建应用", defaultAppName, "im:message", "bitable:app", "1.0.0", "自动打开应用详情页", "App ID"} {
 		if !strings.Contains(withCreate, want) {
 			t.Fatalf("确认清单缺少 %q: %s", want, withCreate)
 		}
 	}
-	if strings.Contains(strings.Join(setupPlan("", false), "|"), "创建企业自建应用") {
+	if strings.Contains(strings.Join(setupPlan(Portals["feishu"], "", false), "|"), "创建应用") {
 		t.Fatal("已有应用时不应把创建应用列进确认清单")
 	}
 }
@@ -143,6 +147,14 @@ func TestSetupStageOutcomesIndependent(t *testing.T) {
 	}
 	if strings.Join(skipped, ",") != "extra" {
 		t.Fatalf("skipped 不应被当成失败: %v", skipped)
+	}
+	// 凭据阶段非 done 必须算 failed,否则后续阶段成功会把整体洗成 done。
+	failed2, _ := setupStageOutcomes([]SetupStep{
+		{ID: "capture", Status: "capture_failed"},
+		{ID: "publish", Status: "already_done"},
+	})
+	if strings.Join(failed2, ",") != "capture" {
+		t.Fatalf("capture 失败必须进 failed: %v", failed2)
 	}
 }
 
