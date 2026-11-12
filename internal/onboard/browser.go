@@ -290,6 +290,40 @@ func (bx *BrowserExecutor) runOp(op Op, creds map[string]string) error {
 				panic(err)
 			}
 			el.Timeout(browserOpTimeout).MustSelectAllText().MustInput(text) // 全选旧值后输入,实现覆盖式填表
+			// 读回校验:钉钉版本表单的 textarea#description 是 antd 受控组件,
+			// MustInput 的键盘事件在焦点未落入时静默丢失(2026-11-12 真机实测:
+			// 版本号 fill 生效、描述 fill 落空,版本描述又是必填项,导致「保存」
+			// 校验失败、草稿未生成)。读回用 JS 读 el.value(input/textarea 的
+			// textContent 不反映当前值);不一致时降级 JS 原生 setter + input
+			// 事件(React 受控组件标准填法),再读回一次;仍不一致才报错。
+			// 已验证平台(飞书)读回一致时行为与旧版完全一致。
+			readJS := `(sel) => { const el = document.querySelector(sel); return el ? el.value : null }`
+			readBack := func() string {
+				res, err := bx.page.Timeout(browserOpTimeout).Eval(readJS, op.Target)
+				if err != nil {
+					return ""
+				}
+				return strings.TrimSpace(res.Value.String())
+			}
+			if readBack() != strings.TrimSpace(text) {
+				setJS := `({sel, val}) => {
+					const el = document.querySelector(sel);
+					if (!el) return 'not-found';
+					const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+					const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+					setter.call(el, val);
+					el.dispatchEvent(new Event('input', {bubbles: true}));
+					el.dispatchEvent(new Event('change', {bubbles: true}));
+					return el.value;
+				}`
+				res, err := bx.page.Timeout(browserOpTimeout).Eval(setJS, map[string]string{"sel": op.Target, "val": text})
+				if err != nil {
+					panic(err)
+				}
+				if readBack() != strings.TrimSpace(text) {
+					panic(fmt.Sprintf("fill 校验失败:目标=%s 读回=%q 期望=%q", op.Target, res.Value.String(), text))
+				}
+			}
 		})
 	case "readText":
 		return bx.safe(func() {

@@ -191,7 +191,12 @@ func dingtalkStages() []setupStage {
 				// 真机表单版本号字段默认空(显示「版本号格式1.0.0」提示),不填版本号「保存」
 				// 会因校验失败、不生成草稿。20:40 真机执行就栽在这里:apply 只 waitVisible
 				// 了 input#version 却没 fill,事后只读快照确认版本列表仍只有 1.0.0 已上线、
-				// 没有 1.0.1 草稿。补显式填写 1.0.1(仍需再次授权复跑验证)。
+				// 没有 1.0.1 草稿。
+				// 2026-11-12 复跑(fill 1.0.1 已生效并跨重启留存)仍无草稿,只读探针定位到
+				// 第二根因:版本描述 label 带 dtd-form-item-required,是必填项;而执行器
+				// MustInput 的键盘事件在焦点未落入 textarea 时静默丢失(版本号 fill 生效、
+				// 描述 fill 落空)。browser.go fill 已加「读回校验 + JS 原生 setter 降级」,
+				// 本阶段两条 fill 都会自动走对路径,但仍需再次授权复跑验证。
 				{Kind: "fill", Target: "input#version", Text: "1.0.1", Scope: "apply"},
 				{Kind: "fill", Target: "textarea#description", Text: "mcp-hub 接入自动发布", Scope: "apply"},
 				{Kind: "click", Target: menuCandidateSelector, Match: `^\s*保存\s*$`, Scope: "apply"},
@@ -211,7 +216,7 @@ func dingtalkStages() []setupStage {
 			// 改为按「有待发布版本」做幂等:无待发布版本时执行 apply 创建并保存,
 			// 已存在待发布版本则 already_done 跳过。
 			PlanLine:     "创建新版本并保存(版本号沿用后台默认值如 1.0.1;会在企业内产生版本草稿记录;已存在待发布版本则跳过)",
-			ApplyWarning: "「保存」后只生成待发布版本;20:40 真机执行「保存」未生成 1.0.1 草稿(版本号字段为空、apply 当时未填,已补 fill 1.0.1 待复跑验证),发布按钮未真机校准(采集它等于真发布),不自动点击。请在后台核对版本列表与内容后再手动发布",
+			ApplyWarning: "「保存」后只生成待发布版本;20:40 与 11-12 两次真机「保存」均未生成 1.0.1 草稿:前者因版本号未填、后者因版本描述(必填)的键盘事件 fill 静默落空,均已修复(fill 1.0.1 + fill 读回校验/JS setter 降级)但尚未复跑验证;发布按钮未真机校准(采集它等于真发布),不自动点击。请在后台核对版本列表与内容后再手动发布",
 		},
 	}
 }
