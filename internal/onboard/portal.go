@@ -243,7 +243,10 @@ var Portals = map[string]*Portal{
 			// aria-label=复制 的图标。2026-11-12 用户手工点该图标确认写入剪贴板的是
 			// **完整明文** —— 旧注释/文案把「渲染成掩码」误写成「平台不提供明文」,
 			// 且从没人点过复制按钮。现由 copyToCred 自动点复制并读回明文;
-			// 该自动路径尚未真机端到端验证,失败按 selector_miss 降级 set_credentials。
+			// 2026-11-12 第十四轮已在真实 /baseinfo 页端到端跑通:6 个 Ops 全绿、
+			// hook 主路径捕获 64 位明文(未读系统剪贴板)、Secret≠Client ID、
+			// 格式与真连校验通过、.env 写入成功、复跑幂等。
+			// 失败仍按 selector_miss 降级 set_credentials。
 			{ID: "collect-creds", Brief: "凭证与基础信息:读 Client ID / 复制 Client Secret 明文", Cred: true,
 				URLs: []string{"https://open-dev.dingtalk.com/"},
 				Browser: &BrowserAction{

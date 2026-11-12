@@ -176,7 +176,7 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 **三个层次，逐层降级**：
 
 1. **L1 凭据兜底**（`set_credentials`）：不依赖任何 DOM，四平台通用；真连校验失败一律不写盘，回复里不回显凭据值。任何页面选择器失败都降级到这里，永不要求用户切终端。
-2. **L2 浏览器抓取**：四平台的 `collect-creds` 都挂了声明式动作。飞书按实测 DOM 读 `.secret-code__code`；钉钉的详情页是单页多 tab（`CredTab` / `CredTabFragment` 声明），会**先点「凭证与基础信息」切到 `/baseinfo`** 再用 `readPage` + 正则抽取（零 class 依赖），企微/腾讯文档直接读整页文本。钉钉 `/baseinfo`：`Client ID` 明文可读；`Client Secret` **页面渲染**为 `当前使用:xxxx****xxxx` 掩码，但同一行右侧复制图标写入剪贴板的是**完整明文**（2026-11-12 用户手工点复制确认）。因此新增 `copyToCred` Op：注入 hook 拦截 `clipboard.writeText` / `execCommand('copy')` 捕获明文（**不读系统剪贴板**），捕获不到才降级 `navigator.clipboard.readText()`；按「文本最短的凭证块」定位，避免误点 `Client ID` 的复制按钮。读回值仍交格式校验，**绝不把掩码写进 `.env`**；复制按钮定位失效才按 `next` 降级 L1。主路径与降级路径已在本地构造页真机验证，**钉钉真机端到端尚未验证**（登录态已清，见下段）。
+2. **L2 浏览器抓取**：四平台的 `collect-creds` 都挂了声明式动作。飞书按实测 DOM 读 `.secret-code__code`；钉钉的详情页是单页多 tab（`CredTab` / `CredTabFragment` 声明），会**先点「凭证与基础信息」切到 `/baseinfo`** 再用 `readPage` + 正则抽取（零 class 依赖），企微/腾讯文档直接读整页文本。钉钉 `/baseinfo`：`Client ID` 明文可读；`Client Secret` **页面渲染**为 `当前使用:xxxx****xxxx` 掩码，但同一行右侧复制图标写入剪贴板的是**完整明文**（2026-11-12 用户手工点复制确认）。因此新增 `copyToCred` Op：注入 hook 拦截 `clipboard.writeText` / `execCommand('copy')` 捕获明文（**不读系统剪贴板**），捕获不到才降级 `navigator.clipboard.readText()`；按「文本最短的凭证块」定位，避免误点 `Client ID` 的复制按钮。读回值仍交格式校验，**绝不把掩码写进 `.env`**；复制按钮定位失效才按 `next` 降级 L1。主路径与降级路径已在本地构造页验证，2026-11-12 第十四轮又在真实 `/baseinfo` 页端到端跑通（见下方第十四轮）。
 3. **L3 全链路**（`setup`）：`platformStages(p)` 按平台提供权限/发布 Ops，`Portal.Flow` 区分应用控制台与 Token 授权页，`createAppAction` 按 `create-*` 前缀匹配。`platforms[].dom_verified` **如实标注**：飞书与钉钉的 Ops 已在真实后台完整校准（钉钉自 2026-11-12 第十二轮起为 true）。`app_list_verified`（列表页 URL / 行选择器）与 `tabs_verified`（详情页 `/baseinfo` / `/permission` / `/version` 三个 tab 的导航与幂等文本）是两档独立标记，钉钉均为 true。钉钉的**权限、版本表单与「保存→生成草稿→发布按钮」全链路已真机验证**（见下方「钉钉表单自动提交」）；仍未覆盖的是创建应用表单（`/app/create`，属 `create_app.go` 独立链路，本次后台已有应用未走该分支），不掺进 `dom_verified`。
 
 `start` 会先跑一次 `watch`：若已停在应用详情页，返回 `phase=ready_to_capture`、`manual_steps=[]`，并跳过开新标签，直接引导 Agent 调 `setup`——避免「人已经登录了还让我扫码建应用」。仅 `waiting_login` 时才列出登录步骤。四平台的登录域与详情页特征由 `Portal.LoginHosts` / `CredPages` / `AppIDRe` 声明，判定统一收敛在 `portalDetailMatch`，不再把飞书的 `/app/<appId>` 硬编码成通用规则。
@@ -210,7 +210,17 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 - `browser.go` 新增 `copyToCred` Op：点击前注入 hook 捕获 `navigator.clipboard.writeText` / `document.execCommand('copy')` 的写入值（**不读系统剪贴板、不碰用户其它剪贴内容、不回显 Secret**）；hook 未捕获时才经 CDP `Browser.grantPermissions` 授权并降级 `navigator.clipboard.readText()`。定位用「`Target` 容器 + `Match` 文本正则 + 文本最短优先」，避免 `Client ID` / `Client Secret` 同处一个 `<tr>` 时误点前者。读到的值只进内存 `Collected`，格式合规与否统一由 `commitCredentials` 判定，掩码照常走 `invalid_format` 降级，**绝不伪装成成功**。
 - `portal.go` 钉钉 `collect-creds` 第 6 步由「`extract` 抓掩码串」改为 `copyToCred`（`Script` 升级 `dingtalk@2026-11-12-creds`）；`capture.go` 的 `next`、`platforms.go` 的 hint 全部改为基于实测的诚实表述。
 - **本地构造页真机验证**（模拟钉钉两列 `<td>` + 各带 `aria-label=复制`）：主路径 hook 捕获读到 33 位明文、`HAS_MASK=false`、`IS_ID_COPY=false`（确认没误点 Client ID）；降级路径 `readText` 读到 40 位明文。两路径均通过，单测 161+ 项全绿。
-- **诚实边界**：`copyToCred` 的定位选择器基于历史 DOM dump 与截图，**钉钉真机端到端尚未跑过**（上一轮按用户要求清掉了调试 Chrome 与 profile，登录态已失效）。因此 `dom_verified` 不因本次改动扩张，失败仍按 `selector_miss` 降级 `set_credentials`。要闭环需重启调试 Chrome + 用户重新扫码登录。
+- **诚实边界（第十三轮当时，已闭环）**：`copyToCred` 的定位选择器最初基于历史 DOM dump 与截图，当时钉钉真机端到端尚未跑过；`dom_verified` 不因那次改动扩张，失败按 `selector_miss` 降级 `set_credentials`。**该边界已在第十四轮闭环，见下。**
+
+**第十四轮：`copyToCred` 钉钉真机端到端验证通过**（2026-11-12）：用户指定 `/fe/ai#/app/<appId>/baseinfo` 页面，要求真机验证并「拿取」凭据。
+
+- **环境**：上一轮按用户要求清掉了调试 Chrome 与 `~/.chrome-debug-profile`，本轮用 `--no-sandbox --disable-gpu --disable-software-rasterizer` 重建 9222 实例（默认参数仍 exit 133 / `GPU process isn't usable`），用户扫码登录后停在 `/baseinfo`。
+- **先排掉一个假失败**：宿主拉起的 hub 进程仍是 `bin/hub` 重建前的二进制——`hub.onboard.capture(dingtalk)` 返回 `incomplete` + 旧断言「平台不提供明文,纯 DOM 无法抓取」，而这句已由 `a67295c` 删除、当前源码零残留。stdio 宿主不会自动重载二进制，因此该结果**不能作为真机判定**；需在连接器页面禁用/启用 `mcp-hub`（或新开会话）后才生效。
+- **方法**：用最新源码现场编译同包只读探针（跑完即删、不进版本库）直连同一调试 Chrome，执行 `captureOps(credAction)`；只报告键名、长度、是否掩码、是否误点与格式校验结果，不回显任何值。
+- **证据**：`dingtalk@2026-11-12-creds` 的 6 个 Ops 全绿；`Client ID` 20 位 `ding` 前缀、`Client Secret` **64 位非掩码**，两者格式均 `pass`；`Secret ≠ Client ID`（未误点 Client ID 复制按钮）；`{"hook":true,"captured":2}` 证明走 hook 主路径、**未降级读系统剪贴板**；复跑幂等仍 PASS。
+- **收尾**：完整 `Capture` 返回 `phase=done`、两键均 collected，钉钉 token 接口真连校验通过，`.env` 写入仓库根（被 `.gitignore` 忽略）。**诚实边界：探针的 `reload` 是 no-op，宿主并未真正热重载**，`.env` 要等连接器重拉才生效，不把返回值里「已完成热重载」当真。
+- **回归**：`gofmt` 空 / `go build ./...` / `go vet ./...` / 全量 6 包测试绿；工作区干净。
+- **仍成立的边界**：`dom_verified` 维持 `true` 不扩张；创建应用表单（`/app/create`）未走过；**发布仍不自动点**（Hub 只建草稿）；未创建应用、未开权限、未点发布、未重试提交、未回显任何凭据值。
 
 **端到端真机执行**（2026-11-11 第六轮，`setup(platform="dingtalk", confirmed=true)`）：留证 `/tmp/setup-true-20261111.json`，结果 `phase=partial`，**与预期不同**，如实记录：
 
