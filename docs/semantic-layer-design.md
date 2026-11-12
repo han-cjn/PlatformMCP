@@ -114,7 +114,7 @@ type PlatformMapping struct {
 }
 ```
 
-**钉钉**（`msgParam` 是含 title/text 的 JSON 字符串）：
+**钉钉**（`msgParam` 传 object，由官方 MCP 序列化一次）：
 
 ```go
 "dingtalk": {
@@ -122,7 +122,7 @@ type PlatformMapping struct {
     Args: map[string]string{"openConversationId": "$.target"},
     Encode: []FieldEncode{{
         Target: "msgParam",
-        Format: "json",
+        Format: "plain",  // 不能写 "json":官方 dingtalk-mcp 会再 stringify 一次
         From: map[string]string{
             "title": "$.title ?? MCP Hub",  // 缺省回退
             "text":  "$.text",
@@ -130,6 +130,14 @@ type PlatformMapping struct {
     }},
 }
 ```
+
+> 2026-11-12 真机实测：`dingtalk-mcp@1.1.21` 的 `dist/DingTalkMCPServer.js`
+> 对 `extendType:'json'` 参数执行 `JSON.stringify(args[name])`。若 Hub 侧用
+> `Format:"json"` 先生成字符串，会被二次序列化成带转义的字符串字面量，钉钉 API
+> 返回 `invalidParameter.msgParam.invalid / msgParam必须是json格式`。钉钉 API 本身
+> 要的确实是 JSON 字符串，但**只能由官方 MCP 生成一次**（直连 API 时则自己生成一次）。
+> 修复后真机探针（传 object + 必然无效的会话 ID）返回 `invalid.openConversationId`，
+> 证明消息体已被接受；经宿主 `im.send_text` 的完整链路复跑仍需重拉连接器。
 
 **企微**（平铺，最简单）：
 

@@ -52,7 +52,11 @@ var ImSendText = &Capability{
 			Tool:    "im_v1_message_create",
 			Adapter: "feishu.send_text",
 		},
-		// 钉钉:msgParam.text 原生按 markdown 渲染,plain/markdown 用同一路径
+		// 钉钉:msgParam.text 原生按 markdown 渲染,plain/markdown 用同一路径。
+		// 必须传 object(Format:"plain"):官方 dingtalk-mcp 对 extendType:'json'
+		// 的参数会自己执行一次 JSON.stringify。Hub 若先序列化成 JSON 字符串,
+		// 就被二次 stringify 成带转义的字面量,钉钉报
+		// invalidParameter.msgParam.invalid / msgParam必须是json格式。
 		"dingtalk": {
 			Tool: "sendMessageToGroupByRobot",
 			Args: map[string]string{
@@ -60,7 +64,7 @@ var ImSendText = &Capability{
 			},
 			Encode: []FieldEncode{{
 				Target: "msgParam",
-				Format: "json",
+				Format: "plain",
 				From: map[string]string{
 					"title": "$.title ?? MCP Hub",
 					"text":  "$.text",

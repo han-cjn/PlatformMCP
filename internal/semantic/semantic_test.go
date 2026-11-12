@@ -92,11 +92,12 @@ func TestSendTextDingTalkMapping(t *testing.T) {
 	if f.args["openConversationId"] != "cid_abc" {
 		t.Fatalf("openConversationId 不符: %v", f.args["openConversationId"])
 	}
-	// title 未提供:应回退默认值 "MCP Hub"(与旧实现一致)
-	raw, _ := f.args["msgParam"].(string)
-	var mp map[string]string
-	if err := json.Unmarshal([]byte(raw), &mp); err != nil {
-		t.Fatalf("msgParam 应为 JSON 字符串: %v (%q)", err, raw)
+	// title 未提供:应回退默认值 "MCP Hub"(与旧实现一致)。
+	// msgParam 必须是 object:官方 dingtalk-mcp 会自行 JSON.stringify,
+	// Hub 若先序列化成字符串,会被二次 stringify → 钉钉报 msgParam 格式错误。
+	mp, ok := f.args["msgParam"].(map[string]any)
+	if !ok {
+		t.Fatalf("msgParam 应为 object(map),实际 %T: %v", f.args["msgParam"], f.args["msgParam"])
 	}
 	if mp["title"] != "MCP Hub" || mp["text"] != "hello" {
 		t.Fatalf("msgParam 不符: %v", mp)
@@ -353,12 +354,49 @@ func TestSendTextMarkdownDingTalkKeepsRaw(t *testing.T) {
 		map[string]any{"target": "cid", "text": md, "format": "markdown"}, nil); err != nil {
 		t.Fatalf("调用失败: %v", err)
 	}
-	var mp map[string]string
-	if err := json.Unmarshal([]byte(f.args["msgParam"].(string)), &mp); err != nil {
-		t.Fatalf("msgParam 应为 JSON: %v", err)
+	mp, ok := f.args["msgParam"].(map[string]any)
+	if !ok {
+		t.Fatalf("msgParam 应为 object(map),实际 %T", f.args["msgParam"])
 	}
 	if mp["text"] != md {
 		t.Fatalf("钉钉应原样传递 markdown,实际 %q", mp["text"])
+	}
+}
+
+// TestDingTalkMsgParamNoDoubleEncoding 锁定「Hub 不预先序列化」这一契约。
+// 官方 dingtalk-mcp(dist/DingTalkMCPServer.js) 对 extendType:json 参数执行
+// JSON.stringify(args[name]);若 Hub 传字符串,会被二次序列化成带转义的字面量,
+// 钉钉 API 返回 invalidParameter.msgParam.invalid / msgParam必须是json格式。
+func TestDingTalkMsgParamNoDoubleEncoding(t *testing.T) {
+	f := &fakeCaller{}
+	text := "**【放假通知】**\n明天放假一天"
+	if _, err := Invoke(context.Background(), BuiltinCatalog(), f, "im.send_text", "dingtalk",
+		map[string]any{"target": "cid", "text": text, "title": "放假通知"}, nil); err != nil {
+		t.Fatalf("调用失败: %v", err)
+	}
+	mp, ok := f.args["msgParam"].(map[string]any)
+	if !ok {
+		t.Fatalf("msgParam 必须是 object,实际 %T: Hub 传字符串会被官方 MCP 二次 stringify",
+			f.args["msgParam"])
+	}
+	// 模拟官方 MCP 的 JSON.stringify:一次序列化后应能解析回对象且字段不变。
+	raw, err := json.Marshal(mp)
+	if err != nil {
+		t.Fatalf("序列化 object 失败: %v", err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("一次序列化后应可解析为对象: %v (%s)", err, raw)
+	}
+	if back["title"] != "放假通知" || back["text"] != text {
+		t.Fatalf("一次序列化后字段不符: %v", back)
+	}
+	// 反面对照:若 Hub 先序列化成字符串,官方 MCP 再 stringify 一次,
+	// 得到字符串字面量,解析回 map 必然失败 —— 这正是线上 400 的成因。
+	double, _ := json.Marshal(string(raw))
+	var broken map[string]any
+	if err := json.Unmarshal(double, &broken); err == nil {
+		t.Fatal("双重序列化本应无法解析为对象,契约可能被破坏")
 	}
 }
 

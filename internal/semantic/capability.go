@@ -45,7 +45,7 @@ type PlatformMapping struct {
 // FieldEncode 把多个领域字段编码(JSON 或拼接)后写入某个下游参数路径。
 type FieldEncode struct {
 	Target string            `json:"target"` // 下游路径,如 data.content
-	Format string            `json:"format"` // json / plain
+	Format string            `json:"format"` // json(序列化为字符串) / plain(原样传对象)
 	From   map[string]string `json:"from"`   // 编码前的字段名 -> 表达式
 }
 

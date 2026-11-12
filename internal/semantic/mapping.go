@@ -64,6 +64,9 @@ func (m PlatformMapping) Build(domain map[string]any) (map[string]any, error) {
 			}
 			setPath(args, enc.Target, string(raw))
 		case "plain":
+			// 原样写入对象,不做序列化。用于下游 MCP 会自行序列化的场景:
+			// 钉钉 msgParam 由官方 dingtalk-mcp 的 extendType:json 负责 stringify,
+			// Hub 若先序列化会被二次 stringify → 钉钉报 msgParam 格式错误。
 			setPath(args, enc.Target, payload)
 		default:
 			return nil, fmt.Errorf("encode format %q 不支持(仅 json / plain)", enc.Format)

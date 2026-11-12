@@ -222,6 +222,14 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 - **回归**：`gofmt` 空 / `go build ./...` / `go vet ./...` / 全量 6 包测试绿；工作区干净。
 - **仍成立的边界**：`dom_verified` 维持 `true` 不扩张；创建应用表单（`/app/create`）未走过；**发布仍不自动点**（Hub 只建草稿）；未创建应用、未开权限、未点发布、未重试提交、未回显任何凭据值。
 
+**第十五轮：修复钉钉发消息的 `msgParam` 双重序列化**（2026-11-12）：用户授权发「明天放假」通知时，`im.send_text(dingtalk)` 返回 `400 invalidParameter.msgParam.invalid / msgParam必须是json格式`。
+
+- **根因**：`internal/semantic/mapping.go` 的 `Encode.Format="json"` 先把 `{title,text}` 序列化成 JSON 字符串；官方 `dingtalk-mcp@1.1.21` 的 `dist/DingTalkMCPServer.js` 对 `extendType:'json'` 参数又执行一次 `JSON.stringify` → 二次序列化成带转义的字符串字面量。`docs/semantic-layer-design.md:410` 历史用无效 target 得到 `invalid.openConversationId`（消息体被接受），说明是 `@latest` 上游行为变更导致的回归。
+- **修复**：`capabilities.go` 钉钉 `Encode.Format` 改为 `plain`（原样传 object，由官方 MCP stringify 一次）；`semantic_test.go` 两处断言改断言 `map[string]any`，并新增回归测试模拟官方 MCP 的一次序列化。飞书 `data.content` 仍用 `json`，不受影响。
+- **旁证**：直连钉钉官方 API、把 `msgParam` 作为 JSON 字符串只传一次即 `HTTP 200 + processQueryKey`，通知已投递到 `cidsMGUlJ…` 群；同时确认 `ROBOT_CODE=AppKey` 假设成立。`hub.tools` 的 `ExposedName` 只是清单报告，`main.go:330` 只注册语义工具，客户端调不到原生工具，故当时用直连 API 绕过、未改代码。
+- **验证**：`gofmt` 空 / `go build ./...` / `go vet ./...` / 全量 6 包测试绿；新增 `TestDingTalkMsgParamNoDoubleEncoding` 锁定「Hub 传 object」契约，并用反面对照复现二次序列化。真机探针直连官方 `dingtalk-mcp`、传 object + **必然无效的会话 ID**，返回 `invalid.openConversationId`（消息体被接受、只是找不到会话），与 `docs/semantic-layer-design.md:410` 的历史口径一致，**未打扰任何真实群**。
+- **诚实边界**：经宿主 `im.send_text` 的**完整链路 + 真实群投递仍未跑**——stdio 宿主不会自动重载二进制，需禁用/启用 `mcp-hub` 才生效；且完整复跑会再往群里发一条消息（不可逆），未经用户授权不擅自发。当前证据覆盖「Hub 参数构造正确」与「官方 MCP 接受 object」，**不宣称运行时端到端已验证**。
+
 **端到端真机执行**（2026-11-11 第六轮，`setup(platform="dingtalk", confirmed=true)`）：留证 `/tmp/setup-true-20261111.json`，结果 `phase=partial`，**与预期不同**，如实记录：
 
 | 阶段 | 实测 | 说明 |
