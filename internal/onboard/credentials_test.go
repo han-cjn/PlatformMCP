@@ -14,6 +14,7 @@ var testCredValues = map[string]map[string]string{
 	},
 	"dingtalk": {
 		"DINGTALK_Client_ID": "dingabcdefgh", "DINGTALK_Client_Secret": "AbCdEfGhIjKlMnOp1234",
+		"ROBOT_CODE": "dingrobotcode123",
 	},
 	"wecom": {
 		"WECOM_BOT_ID": "botid_12345", "WECOM_BOT_SECRET": "AbCdEfGhIjKlMnOp1234",
@@ -28,7 +29,7 @@ func okValidate(_ map[string]string) error { return nil }
 // TestCredentialFieldsAllPlatforms 四个平台都必须有可收集的凭据字段,
 // 这是 set_credentials 能「零 DOM、四平台通吃」的前提。
 func TestCredentialFieldsAllPlatforms(t *testing.T) {
-	want := map[string]int{"feishu": 2, "dingtalk": 2, "wecom": 2, "tencent-docs": 1}
+	want := map[string]int{"feishu": 2, "dingtalk": 3, "wecom": 2, "tencent-docs": 1}
 	for _, id := range PlatformOrder() {
 		fields := CredentialFields(id)
 		if len(fields) != want[id] {

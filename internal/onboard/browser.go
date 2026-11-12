@@ -357,6 +357,8 @@ func (bx *BrowserExecutor) runOp(op Op, creds map[string]string) error {
 		})
 	case "copyToCred": // 点「复制」图标读明文(钉钉 Client Secret 渲染成掩码但复制给出明文)
 		return bx.copyToCred(op)
+	case "copyInFrame": // 同源 iframe 内的文本型「复制」控件(钉钉 /bot 页的「复制 RobotCode」)
+		return bx.copyInFrame(op)
 	case "extract": // 从 readPage 抓到的整页文本里按正则抽取凭据,不依赖任何易变的 DOM class
 		text := bx.Collected["__page_text__"]
 		if text == "" {
@@ -728,3 +730,208 @@ const locateCopyButtonJS = `({rowSel, match, btnSel}) => {
 	}
 	return 'not-found';
 }`
+
+// ---- 跨同源 iframe 的复制控件(copyInFrame) ----
+//
+// 背景(2026-11-12 真机实测):钉钉应用「机器人」tab 的内容并不渲染在 /fe/ai
+// 外层 SPA,而是嵌在同源 iframe open-dev.dingtalk.com/fe/app?isHideOuterFrame=true
+// 里;外层 body 只有左侧菜单。「复制 RobotCode」是
+//
+//	<p class="robotStatus___…"><span role="img">…</span>复制 RobotCode</p>
+//
+// 既不是 button 也没有 aria-label,所以 copyToCred 的定位器抓不到。
+//
+// 与 copyToCred 的差异(刻意做成新 Kind,不动已验证的 Client Secret 链路):
+//   - hook 装到主 window + 所有同源 iframe 的 window(跨域 iframe 自动跳过);
+//   - 在这些 document 里按「文本最短容器 + Match + btnSel」定位,支持容器自身
+//     命中 btnSel(c.matches),以覆盖 <p> 这类文本型复制控件;
+//   - 用 iframe 偏移换算出**视口绝对坐标**,通过 CDP 真实鼠标点击。
+//     真机实测:JS el.click() 会让钉钉 iframe 里的 handler 卡住 CDP 会话
+//     (25s 超时),真实鼠标点击稳定命中,也不伪造 trusted 事件;
+//   - 读值仍走 hook 主路径,只有 hook 未捕获才降级读系统剪贴板。
+const (
+	frameCopyPrepareMax = 10 * time.Second // 轮询等 iframe 渲染的上限(须小于 browserSessionMax)
+	frameCopyReadMax    = 2 * time.Second  // 点击后等 hook 捕获的上限
+)
+
+// frameCopyPrepareJS 一个 Eval 内完成「收集 window → 装 hook → 轮询定位按钮」。
+// 每轮重新收集 iframe:SPA 切 tab 后 iframe 异步挂载、可能换 document,只在
+// 首轮收集会漏掉。返回 JSON 字符串(rod 的 gson.JSON 没有 Array() 方法)。
+const frameCopyPrepareJS = `async ({rowSel, match, btnSel}) => {
+	const collect = () => {
+		const docs = [{win: window, doc: document, frameEl: null, idx: -1}];
+		const iframes = Array.from(document.querySelectorAll('iframe'));
+		for (let i = 0; i < iframes.length; i++) {
+			try {
+				const f = iframes[i], w = f.contentWindow, d = f.contentDocument;
+				if (w && d) docs.push({win: w, doc: d, frameEl: f, idx: i});
+			} catch (e) {}
+		}
+		return docs;
+	};
+	const install = (docs) => {
+		for (const o of docs) {
+			try {
+				const w = o.win;
+				if (w.__hubCopyHook) continue;
+				w.__hubCopyCaptured = [];
+				w.__hubCopyHook = true;
+				const clip = w.navigator.clipboard;
+				if (clip && typeof clip.writeText === 'function') {
+					const orig = clip.writeText.bind(clip);
+					clip.writeText = function (v) {
+						try { w.__hubCopyCaptured.push(String(v)); } catch (e) {}
+						return orig(v);
+					};
+				}
+				const origExec = w.document.execCommand.bind(w.document);
+				w.document.execCommand = function (cmd) {
+					if (String(cmd).toLowerCase() === 'copy') {
+						try {
+							const sel = String(w.getSelection() || '');
+							if (sel.trim()) w.__hubCopyCaptured.push(sel);
+							else {
+								const ae = w.document.activeElement;
+								if (ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT') && ae.value)
+									w.__hubCopyCaptured.push(ae.value);
+							}
+						} catch (e) {}
+					}
+					return origExec.apply(w.document, arguments);
+				};
+			} catch (e) {}
+		}
+	};
+	const re = new RegExp(match, 'i');
+	const find = (docs) => {
+		for (const o of docs) {
+			try {
+				const cand = Array.from(o.doc.querySelectorAll(rowSel))
+					.filter(e => re.test(e.innerText || e.textContent || '') && (e.innerText || '').length < 120);
+				cand.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+				for (const c of cand) {
+					let btn = null;
+					try { if (c.matches && c.matches(btnSel)) btn = c; } catch (e) {}
+					if (!btn) { try { btn = c.querySelector(btnSel); } catch (e) {} }
+					if (!btn) continue;
+					const r = btn.getBoundingClientRect();
+					let ox = 0, oy = 0;
+					if (o.frameEl) { const fr = o.frameEl.getBoundingClientRect(); ox = fr.left; oy = fr.top; }
+					return {btn: btn, x: ox + r.left + r.width / 2, y: oy + r.top + r.height / 2, idx: o.idx};
+				}
+			} catch (e) {}
+		}
+		return null;
+	};
+	let docs = [], hit = null;
+	for (let i = 0; i < 40; i++) {
+		docs = collect();
+		install(docs);
+		hit = find(docs);
+		if (hit) break;
+		await new Promise(r => setTimeout(r, 200));
+	}
+	if (!hit) return JSON.stringify({found: false, docs: docs.length});
+	hit.btn.setAttribute('data-hub-copy', '1');
+	return JSON.stringify({found: true, x: hit.x, y: hit.y, idx: hit.idx, docs: docs.length});
+}`
+
+const frameCopyClearJS = `() => {
+	const wins = [window];
+	for (const f of document.querySelectorAll('iframe')) {
+		try { if (f.contentWindow) wins.push(f.contentWindow); } catch (e) {}
+	}
+	for (const w of wins) { try { w.__hubCopyCaptured = []; } catch (e) {} }
+	return 'ok';
+}`
+
+const frameCopyReadJS = `() => {
+	const wins = [window];
+	for (const f of document.querySelectorAll('iframe')) {
+		try { if (f.contentWindow) wins.push(f.contentWindow); } catch (e) {}
+	}
+	let last = '';
+	for (const w of wins) {
+		try { const a = w.__hubCopyCaptured || []; if (a.length) last = a[a.length - 1]; } catch (e) {}
+	}
+	return String(last || '');
+}`
+
+// copyInFrame 点击同源 iframe 里的文本型「复制」控件,把明文存入
+// bx.Collected[op.ExtractKey]。找不到/读不到都返回 selector_miss 让编排层降级,
+// 绝不猜值、绝不重试提交。
+func (bx *BrowserExecutor) copyInFrame(op Op) error {
+	if op.ExtractKey == "" {
+		return fmt.Errorf("copyInFrame 需要 ExtractKey")
+	}
+	if op.Match == "" {
+		return fmt.Errorf("copyInFrame 需要 Match(复制控件文本正则)")
+	}
+	rowSel := op.Target
+	if rowSel == "" {
+		rowSel = "body *"
+	}
+	btnSel := op.Text
+	if btnSel == "" {
+		btnSel = `p, [role="img"], a, button, [role="button"]`
+	}
+	return bx.safe(func() {
+		res, err := bx.page.Timeout(frameCopyPrepareMax).Eval(frameCopyPrepareJS, map[string]string{
+			"rowSel": rowSel, "match": op.Match, "btnSel": btnSel,
+		})
+		if err != nil {
+			panic(fmt.Errorf("跨 frame 定位复制控件失败: %w", err))
+		}
+		var prep struct {
+			Found bool    `json:"found"`
+			X     float64 `json:"x"`
+			Y     float64 `json:"y"`
+			Idx   int     `json:"idx"`
+			Docs  int     `json:"docs"`
+		}
+		if err := json.Unmarshal([]byte(res.Value.Str()), &prep); err != nil {
+			panic(fmt.Errorf("解析跨 frame 定位结果失败: %w", err))
+		}
+		if !prep.Found {
+			panic(fmt.Errorf("未找到文本匹配 /%s/ 的复制控件(iframe 未加载或页面结构已变?)", op.Match))
+		}
+		// 清掉上一次点击的残留捕获值,避免误把旧值写进本次结果。
+		if _, err := bx.page.Timeout(browserOpTimeout).Eval(frameCopyClearJS); err != nil {
+			panic(err)
+		}
+		// 真实鼠标点击:坐标已换算成主 frame 视口绝对坐标。
+		if err := bx.page.Mouse.MoveTo(proto.Point{X: prep.X, Y: prep.Y}); err != nil {
+			panic(err)
+		}
+		if err := bx.page.Mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
+			panic(err)
+		}
+		val := ""
+		deadline := time.Now().Add(frameCopyReadMax)
+		for time.Now().Before(deadline) {
+			if r, e := bx.page.Timeout(browserOpTimeout).Eval(frameCopyReadJS); e == nil {
+				val = strings.TrimSpace(r.Value.Str())
+			}
+			if val != "" {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if val == "" {
+			// 与 copyToCred 一致的降级:授权后读系统剪贴板(仅此路径会碰系统剪贴板)。
+			_ = proto.BrowserGrantPermissions{
+				Permissions: []proto.BrowserPermissionType{
+					proto.BrowserPermissionTypeClipboardReadWrite,
+					proto.BrowserPermissionTypeClipboardSanitizedWrite,
+				},
+			}.Call(bx.browser)
+			if r, e := bx.page.Timeout(browserOpTimeout).Eval(`() => navigator.clipboard.readText()`); e == nil {
+				val = strings.TrimSpace(r.Value.Str())
+			}
+		}
+		if val == "" {
+			panic("复制控件已点击但未读到剪贴板内容;不猜值、不重试,按 selector_miss 降级")
+		}
+		bx.Collected[op.ExtractKey] = val
+	})
+}

@@ -264,10 +264,11 @@
    - `steps[].status=already_done` → **幂等跳过**,只代表「平台侧原本已满足条件」(如已有已上线版本),
      **不代表本次创建/保存/发布了什么**,也不要据此说「生成了新版本」;确认清单里的版本动作会写明跳过条件
    - `capture` 返回 `phase=incomplete` 且 `collected` 含 `DINGTALK_Client_ID` →
-     钉钉 `Client Secret` 页面渲染成掩码,但复制图标给出的是**完整明文**(2026-11-12 用户手工实测);
-     `collect-creds` 已改为自动点复制读明文(`copyToCred`)。本次读到的仍不是合规明文(可能是掩码或复制按钮定位失效),
-     工具已拒绝写进 `.env`,这是**预期降级不是崩溃**。按 `next` 用表单只向用户索取 `DINGTALK_Client_Secret`,
-     连同 `DINGTALK_Client_ID` 一起交给 `set_credentials`;不要在回复里回显任何值,也不要说「平台不提供明文」
+     钉钉接入需要三项:`DINGTALK_Client_ID`(凭证页明文)、`DINGTALK_Client_Secret`(凭证页渲染成掩码、
+     复制图标给出完整明文)、`ROBOT_CODE`(「机器人」tab 的「复制 RobotCode」,内容在同源 iframe)。
+     `collect-creds` 已自动点这两处复制按钮读明文(`copyToCred` / `copyInFrame`)。本次仍缺值/读到掩码/格式不符,
+     工具已拒绝写进 `.env`,这是**预期降级不是崩溃**。按 `next` 用表单**只向用户索取缺失项**,
+     把三项一起交给 `set_credentials`;不要在回复里回显任何值,也不要说「平台不提供明文」
    - `phase=partial` → **只有列在 `next` 里的阶段未自动完成,其他阶段已独立跑完**,
      不要整体重跑。调用 `hub.onboard.inspect` 拿候选(带标签/role)与 `candidates` 一起转述,
      **绝不自动重试提交表单**
@@ -291,7 +292,7 @@
    - **绝不在回复里回显任何凭据值**
    - `setup` / `capture` / `create_app` 返回 `unsupported`、`selector_miss` 或页面读取失败时,
      一律降级到本工具,**不要让用户切终端**
-7. `hub.onboard.capture` 作为浏览器自动抓凭据(用户已在凭证页时)使用:读 App ID / Secret →
+7. `hub.onboard.capture` 作为浏览器自动抓凭据(用户已在凭证页时)使用:读 App ID / Secret / RobotCode(钉钉) →
    格式校验 → 真连校验 → 写 `.env` → 热重载,全程零终端交互。按 `phase` 处理:
    - `done` → 调 `hub.health` 确认
    - `waiting_login` / `waiting_app_detail` / `page_loading` → 按 `next` 提示继续轮询后重试
@@ -323,6 +324,12 @@
   `Secret≠Client ID`、格式与真连校验通过、`.env` 写入成功、复跑幂等;失败仍按 `next` 降级 `set_credentials`,不要回显凭据值。
   注意:stdio 宿主的 hub 进程不会自动重载新二进制,若 `capture` 返回已被删除的旧断言(如「平台不提供明文」),
   那是进程陈旧**不是**代码失败,提示用户禁用/启用 mcp-hub 连接器后重试,不要据此判定选择器失效
+  **第十六轮(2026-11-12)**:钉钉 `credential_fields` 由两项变三项(新增 `ROBOT_CODE`)——官方 dingtalk-mcp
+  把 robotCode 标成 system 参数,缺它发群消息必报 `ROBOT_CODE is required`,这是「下午 4 点开会」任务失败的根因。
+  `collect-creds` 现在 9 步:抓完 Secret 会点左侧「机器人」菜单,由 `copyInFrame` 跨同源 iframe 点
+  「复制 RobotCode」(文本型 `<p>`,无 button/aria-label;必须用真实鼠标点击,JS `el.click()` 会卡死 CDP)。
+  真机完整 `Capture` 两次 `phase=done`、三键齐全、`.env` 落库、复跑幂等;RobotCode 等于 AppKey,但仍坚持从页面取值。
+  降级时按 `next` 索取**缺失项**(不再固定只补 Secret),三项一起交给 `set_credentials`;不要回显任何值
 - `setup` 权限阶段先用 **API 只读探针**验证,已可用(`api_verified`)或无法确认(`skipped`)
   都跳过 UI 开通;发布阶段先做只读幂等检测,已完成就跳过。各阶段**独立执行**,
   单阶段未命中只停该阶段、不阻断后续阶段,且绝不重试提交表单,避免留下半提交状态

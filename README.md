@@ -230,6 +230,14 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 - **验证**：`gofmt` 空 / `go build ./...` / `go vet ./...` / 全量 6 包测试绿；新增 `TestDingTalkMsgParamNoDoubleEncoding` 锁定「Hub 传 object」契约，并用反面对照复现二次序列化。真机探针直连官方 `dingtalk-mcp`、传 object + **必然无效的会话 ID**，返回 `invalid.openConversationId`（消息体被接受、只是找不到会话），与 `docs/semantic-layer-design.md:410` 的历史口径一致，**未打扰任何真实群**。
 - **诚实边界**：经宿主 `im.send_text` 的**完整链路 + 真实群投递仍未跑**——stdio 宿主不会自动重载二进制，需禁用/启用 `mcp-hub` 才生效；且完整复跑会再往群里发一条消息（不可逆），未经用户授权不擅自发。当前证据覆盖「Hub 参数构造正确」与「官方 MCP 接受 object」，**不宣称运行时端到端已验证**。
 
+**第十六轮：`collect-creds` 自动抓 `ROBOT_CODE`，发群消息闭环**（2026-11-12）：用户给出「下午 4 点开会」的失败任务分享页——那次 `capture` 只写入 `DINGTALK_Client_ID` / `DINGTALK_Client_Secret`，`im.send_text` 随即被 `System parameter ROBOT_CODE is required` 拦下，而 `set_credentials` 因 `PortalCreds` 只声明两项也补不进，消息最终没发出。手工往 `.env` 写一次不可持续（会被清空/重跑覆盖），根上的修法是把它纳入自动抓取。
+
+- **真机 DOM 事实**：钉钉「机器人」tab（`/bot`）的内容**不在外层 SPA**，而在同源 iframe `open-dev.dingtalk.com/fe/app?isHideOuterFrame=true#/pure/appMgr/inner/h5/...` 里，外层 `body` 只有左侧菜单。「复制 RobotCode」是 `<p class="robotStatus___…"><span role="img">…</span>复制 RobotCode</p>`——不是 `button`、没有 `aria-label`，已验证的 `copyToCred` 定位器抓不到。真机还发现：对该控件用 JS `el.click()` 会让 iframe 里的 handler 卡住 CDP 会话（25s 超时），**必须用视口绝对坐标的真实鼠标点击**。
+- **实现**：新增第 13 种 Op `copyInFrame`（hook 装到主 window + 所有同源 iframe 的 window；跨 frame 按「文本最短容器 + `Match` + `btnSel`」定位，支持容器自身命中；iframe 偏移换算坐标后用 CDP 真实鼠标点击；读值仍走 hook 主路径，降级才读系统剪贴板）。`collect-creds` 由 6 步扩到 9 步：读完 Secret 后点「机器人」菜单、`copyInFrame` 抓 `ROBOT_CODE`。`PortalCreds["dingtalk"]` 增第三项 → `commitCredentials` 写 `.env`、`set_credentials.required` 与 `status.credential_fields` 同步变三项，`.env.example` 补说明（`config.json` 白名单早前已含 `ROBOT_CODE`）。**刻意不改动已真机验证的 `copyToCred`**。
+- **真机验证**：用最新源码独立进程跑完整 `Capture(dingtalk)`，两次均 `phase=done`、`collected=[DINGTALK_Client_ID, DINGTALK_Client_Secret, ROBOT_CODE]`、真连校验通过、`.env` 落库三键（64 / 20 / 20 位、均无掩码）、复跑幂等（4.36s / 3.97s）。`/bot` 复制按钮读回的 RobotCode 是 20 位 `ding` 前缀明文，**等于 Client ID（AppKey）**，验证了第十五轮的假设，但坚持从页面复制按钮取值而非靠假设。
+- **发消息闭环**：用真机抓到的 `ROBOT_CODE` + 第十五轮修复后的 **object 形态 `msgParam`**，经官方 `dingtalk-mcp` stdio 等价链路单次调用 `sendMessageToGroupByRobot`，把「各位同事，下午 4 点开会，请准时参加。」投递到用户已确认的 `cidsMGUlJ…` 群，返回 `processQueryKey`。这次同时验真了「真 RobotCode 有效」与「object msgParam 可接受」。
+- **诚实边界**：`dom_verified` 维持 `true` 不扩张；独立探针的 `reload` 是 no-op，`Capture` 返回的「已完成热重载」在探针里不成立；**经宿主 `im.send_text` 的完整链路仍需禁用/启用 `mcp-hub` 连接器**才会加载新二进制与新 `.env`。`push_targets.dingtalk` 仍为空（`DINGTALK_OPEN_CONVERSATION_ID` 未写 `.env`），本轮发送显式指定了群 ID。未创建应用、未开权限、未点发布、未重试提交、未回显任何凭据值。
+
 **端到端真机执行**（2026-11-11 第六轮，`setup(platform="dingtalk", confirmed=true)`）：留证 `/tmp/setup-true-20261111.json`，结果 `phase=partial`，**与预期不同**，如实记录：
 
 | 阶段 | 实测 | 说明 |

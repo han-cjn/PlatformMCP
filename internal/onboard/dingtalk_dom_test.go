@@ -72,17 +72,18 @@ snsapi_base 无需审批 已开通 默认开通
 )
 
 // collect-creds 必须先切到 /baseinfo;Client ID 明文抽取,Client Secret 点复制图标
-// 读明文(2026-11-12 用户手工实测:页面渲染掩码,复制图标给出完整明文)。
+// 读明文(2026-11-12 用户手工实测:页面渲染掩码,复制图标给出完整明文);
+// 第十六轮再切「机器人」tab,跨同源 iframe 点「复制 RobotCode」拿 ROBOT_CODE。
 func TestDingtalkCredOpsSwitchToBaseinfoTab(t *testing.T) {
 	act := credAction(Portals["dingtalk"])
 	if act == nil {
 		t.Fatal("钉钉缺少浏览器凭据动作")
 	}
-	if act.Script != "dingtalk@2026-11-12-creds" {
+	if act.Script != "dingtalk@2026-11-12-creds-robot" {
 		t.Fatalf("脚本标记未更新: %s", act.Script)
 	}
-	if len(act.Ops) != 6 {
-		t.Fatalf("凭据 Ops 应为 6 步,实际 %d: %+v", len(act.Ops), act.Ops)
+	if len(act.Ops) != 9 {
+		t.Fatalf("凭据 Ops 应为 9 步,实际 %d: %+v", len(act.Ops), act.Ops)
 	}
 	if act.Ops[0].Kind != "waitVisible" || act.Ops[0].Target != menuCandidateSelector ||
 		!strings.Contains(act.Ops[0].Match, "凭证与基础信息") {
@@ -118,14 +119,29 @@ func TestDingtalkCredOpsSwitchToBaseinfoTab(t *testing.T) {
 			t.Fatalf("仍用 extract 抓掩码 Secret,应改走复制图标: %+v", op)
 		}
 	}
+	// 第 7~9 步:切「机器人」tab,再用 copyInFrame 跨 iframe 抓 ROBOT_CODE。
+	if act.Ops[6].Kind != "waitVisible" || !strings.Contains(act.Ops[6].Match, "机器人") {
+		t.Fatalf("第 7 步应等「机器人」菜单: %+v", act.Ops[6])
+	}
+	if act.Ops[7].Kind != "click" || !strings.Contains(act.Ops[7].Match, "机器人") {
+		t.Fatalf("第 8 步应点「机器人」菜单: %+v", act.Ops[7])
+	}
+	codeOp := act.Ops[8]
+	if codeOp.Kind != "copyInFrame" || codeOp.ExtractKey != "ROBOT_CODE" {
+		t.Fatalf("第 9 步应跨 iframe 复制 RobotCode: %+v", codeOp)
+	}
+	if !strings.Contains(codeOp.Match, "RobotCode") || codeOp.Target == "" || codeOp.Text == "" {
+		t.Fatalf("copyInFrame 缺文本正则/容器/按钮选择器: %+v", codeOp)
+	}
 }
 
-// 掩码绝不能被写进 .env;降级文案必须点明「只差 Secret」。
+// 掩码绝不能被写进 .env;降级文案必须点明三项凭据与兜底入口。
 func TestDingtalkMaskedSecretNeverWritten(t *testing.T) {
 	envPath := filepath.Join(t.TempDir(), ".env")
 	_, ce := commitCredentials("dingtalk", map[string]string{
 		"DINGTALK_Client_ID":     "dingabcdefghijklmnop",
 		"DINGTALK_Client_Secret": "-JxJlo7zXy****pY7Ah3PcyG",
+		"ROBOT_CODE":             "dingrobotcode123",
 	}, CredOptions{EnvPath: envPath, SkipSetEnv: true})
 	if ce == nil || ce.Phase != "invalid_format" {
 		t.Fatalf("掩码应被格式校验拒绝,实际 %+v", ce)
@@ -134,7 +150,7 @@ func TestDingtalkMaskedSecretNeverWritten(t *testing.T) {
 		t.Fatal("掩码凭据不得写入 .env")
 	}
 	next := captureNext(capturePhase(ce.Phase), "dingtalk")
-	for _, want := range []string{"掩码", "set_credentials", "Client Secret", "不要"} {
+	for _, want := range []string{"掩码", "set_credentials", "DINGTALK_Client_Secret", "ROBOT_CODE", "不要"} {
 		if !strings.Contains(next, want) {
 			t.Fatalf("降级指引缺 %q: %s", want, next)
 		}
@@ -505,5 +521,27 @@ func TestCopyToCredContract(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("captureOps 把复制 Secret 明文的步骤过滤掉了")
+	}
+}
+
+// copyInFrame 的静态契约:缺参数必须在碰浏览器之前报错;captureOps 不能把
+// 这一步过滤掉,否则 ROBOT_CODE 又得手工补 .env,im.send_text 继续报 system 参数缺失。
+func TestCopyInFrameContract(t *testing.T) {
+	bx := &BrowserExecutor{}
+	if err := bx.copyInFrame(Op{Kind: "copyInFrame", Match: `复制\s*RobotCode`}); err == nil {
+		t.Fatal("缺 ExtractKey 应直接报错")
+	}
+	if err := bx.copyInFrame(Op{Kind: "copyInFrame", ExtractKey: "ROBOT_CODE"}); err == nil {
+		t.Fatal("缺 Match 应直接报错")
+	}
+	act := credAction(Portals["dingtalk"])
+	found := false
+	for _, op := range captureOps(act) {
+		if op.Kind == "copyInFrame" && op.ExtractKey == "ROBOT_CODE" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("captureOps 把复制 RobotCode 的步骤过滤掉了")
 	}
 }

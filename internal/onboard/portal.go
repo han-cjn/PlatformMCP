@@ -72,9 +72,9 @@ type BrowserAction struct {
 // 存入凭据收集结果(envKey)。Index 表示多匹配元素取第几个(0 起):飞书
 // Secret 的「显示」按钮是同 class 的第 2 个(第 1 个是复制)。
 type Op struct {
-	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / readPage / copyToCred / extract / fill / screenshot / clickInRow
-	Target      string   // CSS 选择器(支持逗号分隔的多候选)或 URL 前缀(navigate/waitURL);clickInRow / copyToCred 时为「行/容器」选择器
-	Text        string   // fill 的输入内容(支持 "$env:KEY");clickInRow 时为行内要点的按钮文本;copyToCred 时为复制按钮选择器
+	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / readPage / copyToCred / copyInFrame / extract / fill / screenshot / clickInRow
+	Target      string   // CSS 选择器(支持逗号分隔的多候选)或 URL 前缀(navigate/waitURL);clickInRow / copyToCred / copyInFrame 时为「行/容器」选择器
+	Text        string   // fill 的输入内容(支持 "$env:KEY");clickInRow 时为行内要点的按钮文本;copyToCred / copyInFrame 时为复制按钮选择器
 	ExtractKey  string   // readText 抽取到的值存入该 envKey
 	Index       int      // 多匹配时取第几个;0 取首个
 	MaskRune    rune     // readText 识别的掩码字符(0 表示用 defaultMaskRune)
@@ -247,10 +247,19 @@ var Portals = map[string]*Portal{
 			// hook 主路径捕获 64 位明文(未读系统剪贴板)、Secret≠Client ID、
 			// 格式与真连校验通过、.env 写入成功、复跑幂等。
 			// 失败仍按 selector_miss 降级 set_credentials。
-			{ID: "collect-creds", Brief: "凭证与基础信息:读 Client ID / 复制 Client Secret 明文", Cred: true,
+			//
+			// 2026-11-12 第十六轮补 ROBOT_CODE:官方 dingtalk-mcp 发群消息把 robotCode
+			// 标成 system: ROBOT_CODE,只抓 AppKey/AppSecret 会让 im.send_text 直接报
+			// "System parameter ROBOT_CODE is required"。机器人 tab(/bot)的内容不在外层
+			// SPA,而在同源 iframe open-dev.dingtalk.com/fe/app?isHideOuterFrame=true 里;
+			// 「复制 RobotCode」是 <p><span role=img/>复制 RobotCode</p>,无 button/aria-label,
+			// 故新增 copyInFrame 跨 frame 定位 + 视口坐标真实鼠标点击(JS el.click() 会卡死
+			// CDP 会话,真机实测)。真机读回 20 位 ding 前缀明文,等于 Client ID(AppKey),
+			// 但坚持从页面复制按钮取值,不靠「等于 AppKey」的假设。
+			{ID: "collect-creds", Brief: "凭证与基础信息:读 Client ID / 复制 Client Secret 与 RobotCode 明文", Cred: true,
 				URLs: []string{"https://open-dev.dingtalk.com/"},
 				Browser: &BrowserAction{
-					Script: "dingtalk@2026-11-12-creds",
+					Script: "dingtalk@2026-11-12-creds-robot",
 					Ops: []Op{
 						// 点进应用默认停在 /permission;先切到 /baseinfo 再读。
 						{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*凭证与基础信息\s*$`},
@@ -262,6 +271,11 @@ var Portals = map[string]*Portal{
 						// 缩小范围,Match 只匹配 Client Secret 块,避免误点 Client ID 的复制按钮。
 						{Kind: "copyToCred", Target: "td, .app-info-item, div", Match: `Client\s*Secret`,
 							Text: `[role="button"], button`, ExtractKey: "DINGTALK_Client_Secret"},
+						// 切到「机器人」tab,在同源 iframe 里点「复制 RobotCode」。
+						{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*机器人\s*$`},
+						{Kind: "click", Target: menuCandidateSelector, Match: `^\s*机器人\s*$`},
+						{Kind: "copyInFrame", Target: "body *", Match: `复制\s*RobotCode`,
+							Text: `p, [role="img"], a, button`, ExtractKey: "ROBOT_CODE"},
 					},
 				}},
 		},
@@ -360,6 +374,10 @@ var PortalCreds = map[string][]Cred{
 	"dingtalk": {
 		{EnvKey: "DINGTALK_Client_ID", Label: "AppKey (注意:此变量名大小写敏感,官方 MCP 要求)", Format: match(reDingKey, "AppKey 形如 dingxxxxxxxx")},
 		{EnvKey: "DINGTALK_Client_Secret", Label: "AppSecret", Format: match(reDingSecret, "Secret 为 16 位以上")},
+		// 官方 dingtalk-mcp 把 robotCode 标成 system: ROBOT_CODE,缺它发群消息
+		// 必报 "System parameter ROBOT_CODE is required"。从「机器人」tab 的
+		// 「复制 RobotCode」按钮读取(2026-11-12 真机:20 位 ding 前缀明文)。
+		{EnvKey: "ROBOT_CODE", Label: "RobotCode (机器人配置页「复制 RobotCode」)", Format: match(reDingKey, "RobotCode 形如 dingxxxxxxxx")},
 	},
 	"wecom": {
 		{EnvKey: "WECOM_BOT_ID", Label: "Bot ID", Format: match(reWeComID, "Bot ID 为 6 位以上")},

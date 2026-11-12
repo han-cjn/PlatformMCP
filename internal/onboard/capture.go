@@ -103,8 +103,9 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 	if err := bx.RunAction(&BrowserAction{Script: act.Script, Ops: captureOps(act)}, env); err != nil {
 		res.Phase = "capture_failed"
 		res.Message = err.Error()
-		res.Next = "请确认停留在「凭证与基础信息」页、Client ID 明文与 Client Secret 的复制图标均可读;" +
-			"然后重试 hub.onboard.capture;若复制按钮定位持续失效,改用 hub.onboard.set_credentials"
+		res.Next = "请确认停留在应用详情页、「凭证与基础信息」的 Client ID 明文与 Client Secret 复制图标、" +
+			"以及「机器人」tab 的「复制 RobotCode」均可读(机器人内容在同源 iframe 里,加载稍慢);" +
+			"然后重试 hub.onboard.capture;若 iframe 或复制按钮定位持续失效,改用 hub.onboard.set_credentials 一次性补齐三项"
 		return res, nil
 	}
 	for k, v := range bx.Collected {
@@ -120,8 +121,9 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 		res.Phase = capturePhase(ce.Phase)
 		res.Message = ce.Message
 		// 只回传「哪些字段已从页面成功读到」的键名,绝不回传值。
-		// 钉钉 /baseinfo 的 Client ID 是明文;Client Secret 由 copyToCred 点复制
-		// 图标读明文,若只读到掩码则格式校验拒绝,让 Agent 明确知道只差一项。
+		// 钉钉 /baseinfo 的 Client ID 是明文、Client Secret 由 copyToCred 点复制
+		// 图标读明文,/bot 的 ROBOT_CODE 由 copyInFrame 跨同源 iframe 点复制读明文;
+		// 读到掩码或不合规值时格式校验拒绝,让 Agent 明确知道还差哪一项。
 		for _, c := range PortalCreds[platform] {
 			v := strings.TrimSpace(env[c.EnvKey])
 			if v != "" && (c.Format == nil || c.Format(v) == nil) {
@@ -165,10 +167,10 @@ func captureNext(phase string, platform ...string) string {
 	switch phase {
 	case "incomplete":
 		if p == "dingtalk" {
-			return "钉钉「凭证与基础信息」页的 Client ID 是明文(见 collected);Client Secret 页面只显示" +
-				"掩码(当前使用:xxxx****xxxx),但右侧复制图标写入剪贴板的是完整明文(2026-11-12 用户手工实测)," +
-				"collect-creds 已改为自动点复制读明文。本次读到的仍不是合规明文(可能是掩码或复制按钮定位失效)," +
-				"已拒绝写入 .env。请用表单只向用户索取 Client Secret,把 Client ID 与 Secret 一起交给 hub.onboard.set_credentials" +
+			return "钉钉接入需要三项:DINGTALK_Client_ID(凭证页明文)、DINGTALK_Client_Secret(凭证页渲染成掩码," +
+				"复制图标给出完整明文)、ROBOT_CODE(「机器人」tab 的「复制 RobotCode」,内容在同源 iframe)。" +
+				"collect-creds 已自动点这两处复制按钮读明文;本次仍缺值、读到掩码或格式不符,已拒绝写入 .env" +
+				"(见 collected 判断已拿到哪几项)。请用表单只向用户索取缺失项,把三项一起交给 hub.onboard.set_credentials" +
 				"完成格式校验→真连校验→写 .env→热重载;不要在回复里回显任何凭据值"
 		}
 		return "页面读取到的值缺失、疑似掩码或格式不符;" +
