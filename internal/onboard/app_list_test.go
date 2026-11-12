@@ -243,15 +243,22 @@ func TestDingtalkCreateOpsMatchRealButton(t *testing.T) {
 }
 
 func TestSupportedPlatformsAppListVerified(t *testing.T) {
+	// 2026-11-12 企微机器人列表页(/wework_admin/frame#/aiHelper/list?tab=manage)
+	// 真机实测可直达、.d2c_bot_name 行可点进详情,与钉钉一样有实测列表页。
+	// 因此有列表页的平台不再只有钉钉;飞书/腾讯文档仍未实测,保持无列表页。
+	appListURLs := map[string]string{
+		"dingtalk": dingAppList,
+		"wecom":    "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage",
+	}
 	for _, info := range SupportedPlatforms(nil) {
-		want := info.ID == "dingtalk"
-		if info.AppListVerified != want {
-			t.Errorf("%s app_list_verified=%v,期望 %v", info.ID, info.AppListVerified, want)
+		wantURL, hasList := appListURLs[info.ID]
+		if info.AppListVerified != hasList {
+			t.Errorf("%s app_list_verified=%v,期望 %v", info.ID, info.AppListVerified, hasList)
 		}
-		if want && info.AppListURL != dingAppList {
-			t.Errorf("钉钉 app_list_url=%q", info.AppListURL)
+		if hasList && info.AppListURL != wantURL {
+			t.Errorf("%s app_list_url=%q,期望 %q", info.ID, info.AppListURL, wantURL)
 		}
-		if !want && info.AppListURL != "" {
+		if !hasList && info.AppListURL != "" {
 			t.Errorf("%s 不应暴露 app_list_url", info.ID)
 		}
 	}

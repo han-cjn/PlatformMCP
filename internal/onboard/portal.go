@@ -324,21 +324,44 @@ var Portals = map[string]*Portal{
 				},
 			}},
 			{ID: "collect-creds", Brief: "复制 Bot ID / Secret", Cred: true,
+				// 2026-11-12 真机实测:详情页 Bot ID/Secret 是纯 DOM 明文、不在 iframe,
+				// 每行右侧有 SVG 复制图标(class=wd-icon-svg-copy_16,非 button/aria-label),
+				// 不在 iframe,不能用 copyInFrame(那是跨同源 iframe 场景);用 copyToCred
+				// (hook 捕获写入值 + 真实鼠标点击 + 降级读系统剪贴板,已真机验证过钉钉
+				// Client Secret 的 svg 复制图标)。Match 按行文本收紧避免误点相邻行。
+				// 脚本版本从 wecom@2026-11-creds 升级为 2026-11-12。
 				Browser: &BrowserAction{
-					Script: "wecom@2026-11-creds",
+					Script: "wecom@2026-11-12-creds",
 					Ops: []Op{
-						{Kind: "readPage"},
-						{Kind: "extract", Target: `(?i)(?:Bot\s*ID|BotID|机器人\s*ID)[^\n]{0,80}?([A-Za-z0-9_-]{6,})`, ExtractKey: "WECOM_BOT_ID"},
-						{Kind: "extract", Target: `(?i)(?:Secret|密钥)[^\n]{0,80}?([A-Za-z0-9_-]{16,})`, ExtractKey: "WECOM_BOT_SECRET"},
+						// 列表页步骤(setup 链路用):navigate 到机器人管理页并点「个人测试」行进详情。
+						// 标记 Scope=list:capture 时已被 gate 要求在详情页,captureOps 会剔除这些,
+						// 只跑下面的 Bot ID / Secret 抓取。
+						{Kind: "navigate", Target: "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage", Scope: "list"},
+						{Kind: "waitVisible", Target: `.d2c_bot_name`, Scope: "list"},
+						{Kind: "click", Target: `.d2c_bot_name`, Scope: "list"},
+						{Kind: "waitURL", Target: "/wework_admin/frame", Scope: "list"},
+						// 详情页是 /aiHelper/detail?aibotid=...,不是 iframe;等 Bot ID 出现再抓。
+						{Kind: "waitVisible", Target: "body", Match: `Bot\s*ID`},
+						// 抓 Bot ID / Secret:匹配行内文本,点击该行内 SVG 复制图标。
+						{Kind: "copyToCred", Target: "div, td, li", Match: `Bot\s*ID`,
+							Text: `svg.wd-icon-svg-copy_16, svg[class*=copy_16], svg[class*=copy_1]`, ExtractKey: "WECOM_BOT_ID"},
+						{Kind: "copyToCred", Target: "div, td, li", Match: `Secret`,
+							Text: `svg.wd-icon-svg-copy_16, svg[class*=copy_16], svg[class*=copy_1]`, ExtractKey: "WECOM_BOT_SECRET"},
 					},
 				}},
 		},
-		Flow:       "app_console",
-		CredPages:  []string{"/robot", "botid=", "/detail", "/baseinfo"},
-		LoginHosts: []string{"login.work.weixin.qq.com", "account.weixin.qq.com"},
-		AppIDRe:    regexp.MustCompile(`(?:botid|robot_id|robotid)=([A-Za-z0-9_-]{6,})`),
-		Perms:      []string{"收发消息"},
-		Validate:   ValidateWeCom,
+		Flow: "app_console",
+		// 详情页只用 aibotid= 精确识别:列表页 /aiHelper/list 与详情页共用
+		// /wework_admin/frame 前缀,把前缀放进 CredPages 会把列表页误判成详情页。
+		// LoginHosts 只留真正的登录域 —— work.weixin.qq.com 是主域,误加会把详情页判成登录页。
+		CredPages:          []string{"aibotid="},
+		LoginHosts:         []string{"login.work.weixin.qq.com"},
+		AppIDRe:            regexp.MustCompile(`aibotid=(\d+)`),
+		AppListURL:         "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage",
+		AppListMarkers:     []string{"智能机器人", "机器人管理", "企业创建"},
+		AppListRowSelector: `.d2c_bot_name`,
+		Perms:              []string{"收发消息"},
+		Validate:           ValidateWeCom,
 	},
 	"tencent-docs": {
 		Name:  "tencent-docs",

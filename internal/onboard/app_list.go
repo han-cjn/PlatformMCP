@@ -44,7 +44,13 @@ func appListBase(p *Portal) string {
 // 整串相等会把「已在列表页」误判成「不在」,从而每次 start 都堆一个新标签。
 func isAppListPage(p *Portal, raw string) bool {
 	base := appListBase(p)
-	return base != "" && strings.HasPrefix(raw, base) && portalPageBelongs(p, raw)
+	if base == "" || !strings.HasPrefix(raw, base) || !portalPageBelongs(p, raw) {
+		return false
+	}
+	// 企微的列表页与详情页共用 host+path 前缀(/wework_admin/frame),靠 hash 区分;
+	// 详情页(#/aiHelper/detail?aibotid=)命中 portalDetailMatch 时必须排除,
+	// 否则详情页会被当成列表页,pickPlatformPage 的「详情优先」被短路。
+	return !portalDetailMatch(p, raw)
 }
 
 // findAppListTab 只读扫描 /json/list,命中即激活到前台。

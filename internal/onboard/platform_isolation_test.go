@@ -20,7 +20,9 @@ const (
 	// /fe/app 是应用列表页(不是详情页),旧常量把两者混为一谈。
 	dingDetail  = "https://open-dev.dingtalk.com/fe/ai?hash=%23%2Fapp%2F1f2e47b9-a105-48f6-9cdc-45b32563a88e%2Fdev#/app/1f2e47b9-a105-48f6-9cdc-45b32563a88e/dev"
 	dingAppList = "https://open-dev.dingtalk.com/fe/app?hash=%23%2Fcorp%2Fapp#/corp/app"
-	wecomDetail = "https://work.weixin.qq.com/ai/robot?botid=bot123456"
+	// 2026-11-12 真机实测:企微机器人详情页是 /wework_admin/frame#/aiHelper/detail?aibotid=<数字>,
+	// 旧常量 /ai/robot?botid= 是推测值。
+	wecomDetail = "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/detail?aibotid=33776999461281670"
 	qqAuthPage  = "https://docs.qq.com/open/auth/mcp.html"
 )
 

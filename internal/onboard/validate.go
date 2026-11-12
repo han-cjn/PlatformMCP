@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -30,9 +32,29 @@ var (
 	httpClient     = &http.Client{Timeout: 10 * time.Second}
 
 	// 企微无公开 REST 校验 API:拉起适配器子进程,观察 WS 认证日志。
+	// WecomAdapterPath 是相对路径,真连验证进程的工作目录决定能否找到适配器;
+	// ValidateWeCom 显式把 cmd.Dir 设到模块根,不依赖调用方的工作目录
+	// (测试从 internal/onboard 跑时,相对路径会解析到包内而找不到 server.js)。
 	WecomAdapterCmd  = "node"
 	WecomAdapterPath = "adapters/wecom-aibot-mcp/server.js"
 )
+
+// moduleRoot 返回 go.mod 所在目录(模块根),供相对路径资源定位。
+// 从当前源文件向上回溯;测试与生产(仓库根)都能正确定位。
+func moduleRoot() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return "."
+	}
+	dir := filepath.Dir(file)
+	for i := 0; i < 8; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		dir = filepath.Dir(dir)
+	}
+	return "."
+}
 
 // ValidateFeishu 用 app_id/secret 换 tenant_access_token,code==0 即凭据有效。
 func ValidateFeishu(env map[string]string) error {
@@ -85,6 +107,8 @@ func ValidateDingTalk(env map[string]string) error {
 // 无官方校验 API,这是最接近真实可用性的验证(连不上≈凭据错误或平台不可达)。
 func ValidateWeCom(env map[string]string) error {
 	cmd := exec.Command(WecomAdapterCmd, WecomAdapterPath)
+	// 适配器是相对路径:把子进程工作目录固定到模块根,与调用方工作目录解耦。
+	cmd.Dir = moduleRoot()
 	cmd.Env = append(os.Environ(),
 		"WECOM_BOT_ID="+env["WECOM_BOT_ID"],
 		"WECOM_BOT_SECRET="+env["WECOM_BOT_SECRET"],

@@ -89,7 +89,10 @@ func TestPortalDetailMatchPerPlatform(t *testing.T) {
 		{"dingtalk", dingDetail, true},
 		{"dingtalk", "https://open-dev.dingtalk.com/fe/ai?appId=dingabc123", true},
 		{"wecom", "https://work.weixin.qq.com/", false},
-		{"wecom", "https://work.weixin.qq.com/ai/robot?botid=bot123456", true},
+		// 2026-11-12 真机实测:详情页是 /wework_admin/frame#/aiHelper/detail?aibotid=<数字>,
+		// 不再是旧的 /ai/robot?botid=(那是推测值)。
+		{"wecom", "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/detail?aibotid=33776999461281670", true},
+		{"wecom", "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage", false},
 		{"tencent-docs", "https://docs.qq.com/open/auth/mcp.html", true},
 		{"tencent-docs", "https://docs.qq.com/open/auth/mcp.html?from=login", true},
 		{"tencent-docs", "https://docs.qq.com/desktop", false},
@@ -111,7 +114,7 @@ func TestPortalIsLoginPagePerPlatform(t *testing.T) {
 		{"dingtalk", "https://login.dingtalk.com/", true},
 		{"dingtalk", "https://open-dev.dingtalk.com/fe/app?appId=dingabc123", false},
 		{"wecom", "https://login.work.weixin.qq.com/wwlogin", true},
-		{"wecom", "https://work.weixin.qq.com/ai/robot?botid=bot123456", false},
+		{"wecom", "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/detail?aibotid=33776999461281670", false},
 		{"tencent-docs", "https://ssl.ptlogin2.qq.com/ptlogin", true},
 	}
 	for _, c := range cases {
@@ -133,7 +136,7 @@ func TestClassifyPagesOtherPlatforms(t *testing.T) {
 		{"dingtalk", []string{dingAppList}, "logged_in", false},
 		{"dingtalk", []string{dingDetail}, "logged_in", true},
 		{"wecom", []string{"https://login.work.weixin.qq.com/wwlogin"}, "waiting_login", false},
-		{"wecom", []string{"https://work.weixin.qq.com/ai/robot?botid=bot123456"}, "logged_in", true},
+		{"wecom", []string{"https://work.weixin.qq.com/wework_admin/frame#/aiHelper/detail?aibotid=33776999461281670"}, "logged_in", true},
 		{"tencent-docs", []string{"https://docs.qq.com/open/auth/mcp.html"}, "logged_in", true},
 	}
 	for _, c := range cases {
@@ -149,7 +152,7 @@ func TestPortalAppID(t *testing.T) {
 	cases := []struct{ platform, url, want string }{
 		{"feishu", "https://open.feishu.cn/app/cli_abc123/baseinfo", "cli_abc123"},
 		{"dingtalk", dingDetail, "1f2e47b9-a105-48f6-9cdc-45b32563a88e"},
-		{"wecom", "https://work.weixin.qq.com/ai/robot?botid=bot123456", "bot123456"},
+		{"wecom", "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/detail?aibotid=33776999461281670", "33776999461281670"},
 	}
 	for _, c := range cases {
 		if got := portalAppID(Portals[c.platform], c.url); got != c.want {

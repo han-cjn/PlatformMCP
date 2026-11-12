@@ -103,9 +103,7 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 	if err := bx.RunAction(&BrowserAction{Script: act.Script, Ops: captureOps(act)}, env); err != nil {
 		res.Phase = "capture_failed"
 		res.Message = err.Error()
-		res.Next = "请确认停留在应用详情页、「凭证与基础信息」的 Client ID 明文与 Client Secret 复制图标、" +
-			"以及「机器人」tab 的「复制 RobotCode」均可读(机器人内容在同源 iframe 里,加载稍慢);" +
-			"然后重试 hub.onboard.capture;若 iframe 或复制按钮定位持续失效,改用 hub.onboard.set_credentials 一次性补齐三项"
+		res.Next = captureFailedNext(platform)
 		return res, nil
 	}
 	for k, v := range bx.Collected {
@@ -137,6 +135,22 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 	res.Phase = "done"
 	res.Next = "凭据已写入 .env 并完成热重载;调用 hub.onboard.setup 可自动完成权限开通与版本发布,之后即可调用 table.query 等能力"
 	return res, nil
+}
+
+// captureFailedNext 给 capture_failed 阶段按平台定制的降级指引。
+func captureFailedNext(platform string) string {
+	switch platform {
+	case "wecom":
+		return "请确认停留在企微机器人详情页(/aiHelper/detail?aibotid=...),Bot ID 与 Secret 行右侧的复制图标均可读;" +
+			"然后重试 hub.onboard.capture;若复制图标定位持续失效,改用 hub.onboard.set_credentials 补齐 WECOM_BOT_ID / WECOM_BOT_SECRET"
+	case "dingtalk":
+		return "请确认停留在应用详情页、「凭证与基础信息」的 Client ID 明文与 Client Secret 复制图标、" +
+			"以及「机器人」tab 的「复制 RobotCode」均可读(机器人内容在同源 iframe 里,加载稍慢);" +
+			"然后重试 hub.onboard.capture;若 iframe 或复制按钮定位持续失效,改用 hub.onboard.set_credentials 一次性补齐三项"
+	default:
+		return "请确认停留在应用详情页、凭据字段与复制图标均可读,然后重试 hub.onboard.capture;" +
+			"若定位持续失效,改用 hub.onboard.set_credentials 补齐凭据"
+	}
 }
 
 // unsupportedCaptureNext 是浏览器抓取动作缺失时唯一的降级指引。

@@ -30,7 +30,7 @@ var platformNames = map[string]string{
 var platformHints = map[string]string{
 	"feishu":       "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准",
 	"dingtalk":     "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准(dom_verified=true)。Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab;权限按真机 code 自动「立即开通」(已开通的行幂等跳过);版本在无待发布版本时创建 1.0.1 并保存为「开发中」草稿(已有待发布版本则跳过),但**刻意不自动点「发布」**——发布不可逆,需人工在后台确认。2026-11-12 真机已验证「保存」真实落库;历史三次失败根因已修:版本号/描述未真正填入、「保存」点击命中外层 div 容器。Client Secret 页面渲染成掩码,但复制图标写入剪贴板的是完整明文(2026-11-12 用户手工实测);collect-creds 已改为 copyToCred 自动点复制读明文,capture 可全自动拿全;2026-11-12 第十四轮已在钉钉真实 /baseinfo 页端到端跑通(hook 主路径读到 64 位明文、Secret≠Client ID、格式与真连校验通过、.env 写入成功、复跑幂等),失败仍按 next 降级 set_credentials;第十六轮 collect-creds 再抓 ROBOT_CODE:切到「机器人」tab,由 copyInFrame 跨同源 iframe 点「复制 RobotCode」(文本型 <p>,无 button/aria-label),真机读到 20 位 ding 前缀明文、等于 AppKey;官方 dingtalk-mcp 发群消息把 robotCode 标成 system: ROBOT_CODE,补上这一项后 im.send_text 才不会再报 ROBOT_CODE is required",
-	"wecom":        "支持 Agent 自动创建智能机器人、抓凭据与启用;后台 DOM 未实测,selector_miss 时降级 set_credentials",
+	"wecom":        "智能机器人接入:2026-11-12 真机实测 collect-creds 端到端跑通——机器人管理页(#/aiHelper/list?tab=manage)点「个人测试」行进详情页(#/aiHelper/detail?aibotid=),Bot ID/Secret 行右侧 SVG 复制图标(wd-icon-svg-copy_16,非 button/aria-label,不在 iframe)由 copyToCred 点复制读明文,格式与长连接真连校验通过、.env 落库、复跑幂等;失败按 next 降级 set_credentials。create-bot(创建)与权限开通未真机校准,dom_verified 保持 false;列表页已实测(app_list_verified=true)",
 	"tencent-docs": "授权页即凭据页,Agent 可自动读 Token 并完成接入;无需建应用/开权限/发布,DOM 未实测时降级 set_credentials",
 }
 

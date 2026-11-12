@@ -238,6 +238,15 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 - **发消息闭环**：用真机抓到的 `ROBOT_CODE` + 第十五轮修复后的 **object 形态 `msgParam`**，经官方 `dingtalk-mcp` stdio 等价链路单次调用 `sendMessageToGroupByRobot`，把「各位同事，下午 4 点开会，请准时参加。」投递到用户已确认的 `cidsMGUlJ…` 群，返回 `processQueryKey`。这次同时验真了「真 RobotCode 有效」与「object msgParam 可接受」。
 - **诚实边界**：`dom_verified` 维持 `true` 不扩张；独立探针的 `reload` 是 no-op，`Capture` 返回的「已完成热重载」在探针里不成立；**经宿主 `im.send_text` 的完整链路仍需禁用/启用 `mcp-hub` 连接器**才会加载新二进制与新 `.env`。`push_targets.dingtalk` 仍为空（`DINGTALK_OPEN_CONVERSATION_ID` 未写 `.env`），本轮发送显式指定了群 ID。未创建应用、未开权限、未点发布、未重试提交、未回显任何凭据值。
 
+**第十七轮：企微智能机器人 `collect-creds` 真机端到端跑通**（2026-11-12）：用户要求把企业微信也接入自动化，「优先 B（已有机器人只抓取），没有再走 A（创建）」。
+
+- **路径判定**：用户扫码登录企微管理后台后，机器人管理页 `/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage` 已有名为「个人测试」的机器人（企业创建、API 模式）→ 走 B，不创建。
+- **真机 DOM 实测**：点「个人测试」（`<span class="d2c_bot_name">`）跳详情页 `#/aiHelper/detail?aibotid=<数字>`；Bot ID / Secret 是纯 DOM 明文，每行右侧是 `<svg class="wd-icon-svg-copy_16">` 复制图标（非 button、无 aria-label、**不在 iframe**——与钉钉 RobotCode 的同源 iframe 场景不同，故用 `copyToCred` 而非 `copyInFrame`）。
+- **实现**：企微 `collect-creds` 从「`readPage` + 两个 `extract`（正则 `[^\n]` 跨不了「Bot ID\n值」换行，必然抓不到）」改为「列表步骤（标 `Scope:"list"`，capture 时剔除）+ 详情页 `waitVisible Bot ID` + 两个 `copyToCred`（btnSel 指 `svg.wd-icon-svg-copy_16`）」。配套修正：`CredPages` 精确到 `aibotid=`（去掉把列表页误判成详情的 `/aiHelper/`）；`LoginHosts` 去掉主域 `work.weixin.qq.com`（否则详情页被 `isLoginPage` 误判成登录页）；`isAppListPage` 排除命中详情的 URL（企微列表/详情共用 `/wework_admin/frame` 前缀）；补 `AppListURL`/`AppListMarkers`/`AppListRowSelector`。脚本版本 `wecom@2026-11-creds` → `wecom@2026-11-12-creds`。
+- **真机验证**：完整 `Capture(wecom)` 两次均 `phase=done`、`collected=[WECOM_BOT_ID, WECOM_BOT_SECRET]`、长连接真连校验通过（`长连接认证成功`）、`.env` 落库（35 / 43 位、均无掩码）、复跑幂等。
+- **顺带修一个真实缺陷**：`ValidateWeCom` 用相对路径 `adapters/wecom-aibot-mcp/server.js` 起适配器子进程，工作目录依赖调用方——测试从 `internal/onboard` 跑时相对路径解析失败、真连验证误报「找不到模块」。修法：`cmd.Dir = moduleRoot()`（回溯到 `go.mod` 所在目录），与调用方工作目录解耦。
+- **gate 口径**：企微 `app_list_verified` 据实测标 `true`（列表页可直达、行可点进详情）；`dom_verified` **保持 `false`**——`create-bot`（创建）与权限开通未真机校准，只验证了抓取链路；`tabs_verified` 保持 `false`（企微详情页是 aibotid 参数直达，非 tab 切换，该 gate 不适用）。未创建机器人、未改权限、未点发布、未回显任何凭据值。
+
 **端到端真机执行**（2026-11-11 第六轮，`setup(platform="dingtalk", confirmed=true)`）：留证 `/tmp/setup-true-20261111.json`，结果 `phase=partial`，**与预期不同**，如实记录：
 
 | 阶段 | 实测 | 说明 |

@@ -292,8 +292,9 @@
    - **绝不在回复里回显任何凭据值**
    - `setup` / `capture` / `create_app` 返回 `unsupported`、`selector_miss` 或页面读取失败时,
      一律降级到本工具,**不要让用户切终端**
-7. `hub.onboard.capture` 作为浏览器自动抓凭据(用户已在凭证页时)使用:读 App ID / Secret / RobotCode(钉钉) →
-   格式校验 → 真连校验 → 写 `.env` → 热重载,全程零终端交互。按 `phase` 处理:
+7. `hub.onboard.capture` 作为浏览器自动抓凭据(用户已在凭证页时)使用:读 App ID / Secret / RobotCode(钉钉) /
+   Bot ID / Secret(企微,2026-11-12 第十七轮真机:机器人详情页 Bot ID/Secret 行右侧 SVG 复制图标,
+   由 `copyToCred` 点复制读明文) → 格式校验 → 真连校验 → 写 `.env` → 热重载,全程零终端交互。按 `phase` 处理:
    - `done` → 调 `hub.health` 确认
    - `waiting_login` / `waiting_app_detail` / `page_loading` → 按 `next` 提示继续轮询后重试
    - 其他 phase → 转述 `message` 与 `next`,按 `next` 降级到 `set_credentials`,不要当成崩溃
