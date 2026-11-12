@@ -355,6 +355,8 @@ func (bx *BrowserExecutor) runOp(op Op, creds map[string]string) error {
 			el := bx.page.Timeout(browserOpTimeout).MustElement("body")
 			bx.Collected["__page_text__"] = el.Timeout(browserOpTimeout).MustText()
 		})
+	case "copyToCred": // 点「复制」图标读明文(钉钉 Client Secret 渲染成掩码但复制给出明文)
+		return bx.copyToCred(op)
 	case "extract": // 从 readPage 抓到的整页文本里按正则抽取凭据,不依赖任何易变的 DOM class
 		text := bx.Collected["__page_text__"]
 		if text == "" {
@@ -575,3 +577,154 @@ func (bx *BrowserExecutor) pick(op Op) (*rod.Element, error) {
 	}
 	return els[op.Index], nil
 }
+
+// copyToCred 点击凭证块里的「复制」图标,把复制到剪贴板的**明文**存入
+// bx.Collected[op.ExtractKey]。
+//
+// 背景(2026-11-12 用户手工实测证伪了旧结论):钉钉 /baseinfo 的 Client Secret
+// 渲染成「当前使用: -JxJlo7zXy****pY7Ah3PcyG」掩码,但同一行右侧的复制图标
+// 写入剪贴板的是**完整明文**。此前 collect-creds 只 readPage + extract,把掩码
+// 交给格式校验后降级 set_credentials,并在注释/文案里把「渲染成掩码」错误写成
+// 「平台不提供明文」——从没人点过那个复制按钮。
+//
+// 合规与隐私边界:
+//   - 主路径注入 hook 捕获 navigator.clipboard.writeText / execCommand('copy')
+//     的参数,**不读系统剪贴板**,不碰用户剪贴板里的其它内容;
+//   - 只有 hook 没捕获(页面用了未知复制实现)时才降级 navigator.clipboard.readText(),
+//     并通过 CDP Browser.grantPermissions 授予 clipboard 权限;
+//   - 读到的值只进内存 Collected,绝不打印、不落日志;是否合规由
+//     commitCredentials 的格式校验统一判定,这里只拒绝空值(掩码照常交给
+//     invalid_format 降级,不伪装成成功)。
+//
+// 定位策略(不依赖易变的 class):Target 为候选容器选择器,Match 为凭证块文本正则,
+// Text 为复制按钮选择器。按「文本最短」排序取最小容器,避免 Client ID / Client
+// Secret 同处一个 <tr> 时误点 Client ID 的复制按钮。找不到就 selector_miss 降级,
+// 绝不猜按钮、绝不重试。
+func (bx *BrowserExecutor) copyToCred(op Op) error {
+	if op.ExtractKey == "" {
+		return fmt.Errorf("copyToCred 需要 ExtractKey")
+	}
+	if op.Match == "" {
+		return fmt.Errorf("copyToCred 需要 Match(凭证块文本正则)")
+	}
+	rowSel := op.Target
+	if rowSel == "" {
+		rowSel = "td, .app-info-item, li, div"
+	}
+	btnSel := op.Text
+	if btnSel == "" {
+		btnSel = `[role="button"], button`
+	}
+	return bx.safe(func() {
+		// 1) 注入 hook,必须在点击之前
+		if _, err := bx.page.Timeout(browserOpTimeout).Eval(copyHookJS); err != nil {
+			panic(fmt.Errorf("注入剪贴板 hook 失败: %w", err))
+		}
+		// 2) 定位目标凭证块里最小的、含复制按钮的容器,并给按钮打标记
+		res, err := bx.page.Timeout(browserOpTimeout).Eval(locateCopyButtonJS, map[string]string{
+			"rowSel": rowSel, "match": op.Match, "btnSel": btnSel,
+		})
+		if err != nil {
+			panic(fmt.Errorf("定位复制按钮失败: %w", err))
+		}
+		if res.Value.Str() != "ok" {
+			panic(fmt.Errorf("未找到文本匹配 /%s/ 且带复制按钮的凭证块(页面结构已变?)", op.Match))
+		}
+		// 3) 真实鼠标点击:React 的 onClick 需要 trusted 事件,不能用 JS el.click()
+		el, err := bx.page.Timeout(browserOpTimeout).Element(`[data-hub-copy="1"]`)
+		if err != nil {
+			panic(err)
+		}
+		if err := el.Timeout(browserClickTimeout).Click(proto.InputMouseButtonLeft, 1); err != nil {
+			panic(err)
+		}
+		// 4) 轮询读 hook 捕获值(复制可能是异步的)
+		val := ""
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			r, e := bx.page.Timeout(browserOpTimeout).Eval(`() => {
+				const a = window.__hubCopyCaptured || [];
+				return a.length ? a[a.length - 1] : '';
+			}`)
+			if e == nil {
+				val = strings.TrimSpace(r.Value.Str())
+			}
+			if val != "" {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		// 5) 降级:hook 未捕获 → 授权后读系统剪贴板(仅此路径会碰系统剪贴板)
+		if val == "" {
+			_ = proto.BrowserGrantPermissions{
+				Permissions: []proto.BrowserPermissionType{
+					proto.BrowserPermissionTypeClipboardReadWrite,
+					proto.BrowserPermissionTypeClipboardSanitizedWrite,
+				},
+			}.Call(bx.browser)
+			if r, e := bx.page.Timeout(browserOpTimeout).Eval(`() => navigator.clipboard.readText()`); e == nil {
+				val = strings.TrimSpace(r.Value.Str())
+			}
+		}
+		if val == "" {
+			panic("复制按钮已点击但未读到剪贴板内容;不猜值、不重试,按 selector_miss 降级")
+		}
+		bx.Collected[op.ExtractKey] = val
+	})
+}
+
+// copyHookJS 在页面上下文拦截复制动作的写入值。覆盖两类实现:现代
+// navigator.clipboard.writeText 与旧式 document.execCommand('copy')。
+const copyHookJS = `() => {
+	if (window.__hubCopyHook) return 'already';
+	window.__hubCopyCaptured = [];
+	window.__hubCopyHook = true;
+	try {
+		const clip = navigator.clipboard;
+		if (clip && typeof clip.writeText === 'function') {
+			const orig = clip.writeText.bind(clip);
+			clip.writeText = function (v) {
+				try { window.__hubCopyCaptured.push(String(v)); } catch (e) {}
+				return orig(v);
+			};
+		}
+	} catch (e) {}
+	try {
+		const origExec = document.execCommand.bind(document);
+		document.execCommand = function (cmd) {
+			if (String(cmd).toLowerCase() === 'copy') {
+				try {
+					const sel = String(window.getSelection() || '');
+					if (sel.trim()) window.__hubCopyCaptured.push(sel);
+					else {
+						const ae = document.activeElement;
+						if (ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT') && ae.value)
+							window.__hubCopyCaptured.push(ae.value);
+					}
+				} catch (e) {}
+			}
+			return origExec.apply(document, arguments);
+		};
+	} catch (e) {}
+	return 'installed';
+}`
+
+// locateCopyButtonJS 找「文本命中 Match 且内部有复制按钮」的最小容器。
+// 先严格按 aria-label=复制 找,再退到调用方给的 btnSel。
+const locateCopyButtonJS = `({rowSel, match, btnSel}) => {
+	const re = new RegExp(match, 'i');
+	const cand = Array.from(document.querySelectorAll(rowSel))
+		.filter(e => re.test(e.innerText || e.textContent || ''));
+	cand.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+	document.querySelectorAll('[data-hub-copy]').forEach(x => x.removeAttribute('data-hub-copy'));
+	const sels = ['[aria-label="复制"], [aria-label="copy"]', btnSel];
+	for (const sel of sels) {
+		for (const c of cand) {
+			const btn = c.querySelector(sel);
+			if (!btn) continue;
+			btn.setAttribute('data-hub-copy', '1');
+			return 'ok';
+		}
+	}
+	return 'not-found';
+}`

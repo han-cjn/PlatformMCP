@@ -264,9 +264,10 @@
    - `steps[].status=already_done` → **幂等跳过**,只代表「平台侧原本已满足条件」(如已有已上线版本),
      **不代表本次创建/保存/发布了什么**,也不要据此说「生成了新版本」;确认清单里的版本动作会写明跳过条件
    - `capture` 返回 `phase=incomplete` 且 `collected` 含 `DINGTALK_Client_ID` →
-     钉钉后台的 `Client Secret` 只显示掩码(平台不提供明文),工具已拒绝把掩码写进 `.env`,
-     这是**预期降级不是崩溃**。按 `next` 用表单只向用户索取 `DINGTALK_Client_Secret`,
-     连同 `DINGTALK_Client_ID` 一起交给 `set_credentials`;不要在回复里回显任何值
+     钉钉 `Client Secret` 页面渲染成掩码,但复制图标给出的是**完整明文**(2026-11-12 用户手工实测);
+     `collect-creds` 已改为自动点复制读明文(`copyToCred`)。本次读到的仍不是合规明文(可能是掩码或复制按钮定位失效),
+     工具已拒绝写进 `.env`,这是**预期降级不是崩溃**。按 `next` 用表单只向用户索取 `DINGTALK_Client_Secret`,
+     连同 `DINGTALK_Client_ID` 一起交给 `set_credentials`;不要在回复里回显任何值,也不要说「平台不提供明文」
    - `phase=partial` → **只有列在 `next` 里的阶段未自动完成,其他阶段已独立跑完**,
      不要整体重跑。调用 `hub.onboard.inspect` 拿候选(带标签/role)与 `candidates` 一起转述,
      **绝不自动重试提交表单**
@@ -316,7 +317,9 @@
   第九~十轮补了 `fill 1.0.1` 仍没生成;第十一轮才定位到真根因——`ElementR` 命中的是 `div.sectionBottom`
   (968px 宽的按钮容器)而非内层 `button`,点击不触发 React 事件(另有描述必填 + 键盘事件静默丢失)。
   **教训:返回 `applied_unverified` 时必须说明「未验证」,绝不能说成「已保存/已生成」**;判断是否真生效要只看后台列表页。
-  钉钉 `Client Secret` 后台只显示掩码,平台不提供明文,必须由用户复制一次后走 `set_credentials`
+  钉钉 `Client Secret` 页面只显示掩码、但复制图标给完整明文(用户手工实测);旧版把它写成「平台不提供明文」是未验证推断,
+  现已由 `copyToCred` 自动点复制读回(capture 可全自动)。该自动路径仅在本地构造页验证过两条读值链路,
+  **钉钉真机端到端未跑**(登录态已清),失败仍按 `next` 降级 `set_credentials`,不要向用户承诺必然自动拿全
 - `setup` 权限阶段先用 **API 只读探针**验证,已可用(`api_verified`)或无法确认(`skipped`)
   都跳过 UI 开通;发布阶段先做只读幂等检测,已完成就跳过。各阶段**独立执行**,
   单阶段未命中只停该阶段、不阻断后续阶段,且绝不重试提交表单,避免留下半提交状态

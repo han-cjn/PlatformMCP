@@ -71,13 +71,14 @@ snsapi_base 无需审批 已开通 默认开通
 保存`
 )
 
-// collect-creds 必须先切到 /baseinfo,再按真实标签抽取;Secret 只有掩码。
+// collect-creds 必须先切到 /baseinfo;Client ID 明文抽取,Client Secret 点复制图标
+// 读明文(2026-11-12 用户手工实测:页面渲染掩码,复制图标给出完整明文)。
 func TestDingtalkCredOpsSwitchToBaseinfoTab(t *testing.T) {
 	act := credAction(Portals["dingtalk"])
 	if act == nil {
 		t.Fatal("钉钉缺少浏览器凭据动作")
 	}
-	if act.Script != "dingtalk@2026-11-11-creds" {
+	if act.Script != "dingtalk@2026-11-12-creds" {
 		t.Fatalf("脚本标记未更新: %s", act.Script)
 	}
 	if len(act.Ops) != 6 {
@@ -101,10 +102,21 @@ func TestDingtalkCredOpsSwitchToBaseinfoTab(t *testing.T) {
 	if got := reID.FindStringSubmatch(dingBaseinfoText); len(got) < 2 || got[1] != "dingabcdefghijklmnop" {
 		t.Fatalf("Client ID 正则未从真机文本抽到明文: %v /%s/", got, act.Ops[4].Target)
 	}
-	reSecret := regexp.MustCompile(act.Ops[5].Target)
-	got := reSecret.FindStringSubmatch(dingBaseinfoText)
-	if len(got) < 2 || !strings.Contains(got[1], "****") {
-		t.Fatalf("Client Secret 正则应命中掩码串(交给格式校验拒绝): %v /%s/", got, act.Ops[5].Target)
+	copyOp := act.Ops[5]
+	if copyOp.Kind != "copyToCred" || copyOp.ExtractKey != "DINGTALK_Client_Secret" {
+		t.Fatalf("第 6 步应点复制图标读 Secret 明文: %+v", copyOp)
+	}
+	if !strings.Contains(copyOp.Match, "Client") || !strings.Contains(copyOp.Match, "Secret") {
+		t.Fatalf("copyToCred 的 Match 必须锁定 Client Secret 块(避免误点 Client ID 复制按钮): %+v", copyOp)
+	}
+	if copyOp.Target == "" || copyOp.Text == "" {
+		t.Fatalf("copyToCred 缺容器/复制按钮选择器: %+v", copyOp)
+	}
+	// 不能再有针对 Client Secret 的 extract:那只会抓到页面渲染的掩码串。
+	for _, op := range act.Ops {
+		if op.Kind == "extract" && op.ExtractKey == "DINGTALK_Client_Secret" {
+			t.Fatalf("仍用 extract 抓掩码 Secret,应改走复制图标: %+v", op)
+		}
 	}
 }
 
@@ -471,5 +483,27 @@ func TestSetupStageOutcomesNotRequired(t *testing.T) {
 	}
 	if len(skipped) != 1 || skipped[0] != "enable_perms" {
 		t.Fatalf("not_required 应计入 skipped: %v", skipped)
+	}
+}
+
+// copyToCred 的静态契约:缺参数必须在碰浏览器之前就报错;capture 的
+// captureOps 过滤不能把这一步丢掉(否则钉钉又退回只抓掩码)。
+func TestCopyToCredContract(t *testing.T) {
+	bx := &BrowserExecutor{}
+	if err := bx.copyToCred(Op{Kind: "copyToCred", Match: `Client\s*Secret`}); err == nil {
+		t.Fatal("缺 ExtractKey 应直接报错")
+	}
+	if err := bx.copyToCred(Op{Kind: "copyToCred", ExtractKey: "DINGTALK_Client_Secret"}); err == nil {
+		t.Fatal("缺 Match 应直接报错")
+	}
+	act := credAction(Portals["dingtalk"])
+	found := false
+	for _, op := range captureOps(act) {
+		if op.Kind == "copyToCred" && op.ExtractKey == "DINGTALK_Client_Secret" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("captureOps 把复制 Secret 明文的步骤过滤掉了")
 	}
 }

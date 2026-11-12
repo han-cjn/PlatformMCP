@@ -47,7 +47,7 @@ func TestCredentialOpsWellFormed(t *testing.T) {
 					t.Fatalf("%s extract 正则非法 %q: %v", id, op.Target, err)
 				}
 				keys[op.ExtractKey] = true
-			case "readText":
+			case "readText", "copyToCred":
 				keys[op.ExtractKey] = true
 			}
 		}
@@ -60,7 +60,8 @@ func TestCredentialOpsWellFormed(t *testing.T) {
 		filtered := captureOps(act)
 		hasExtract := false
 		for _, op := range filtered {
-			if op.Kind == "extract" || (op.Kind == "readText" && op.ExtractKey != "") {
+			if op.Kind == "extract" || (op.Kind == "readText" && op.ExtractKey != "") ||
+				(op.Kind == "copyToCred" && op.ExtractKey != "") {
 				hasExtract = true
 			}
 		}

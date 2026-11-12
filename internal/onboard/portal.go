@@ -68,13 +68,13 @@ type BrowserAction struct {
 	Ops    []Op
 }
 
-// Op 单个浏览器操作。Target 为 CSS 选择器;ExtractKey 表示把该元素文本
+// Op 单个浏览器操作。Target 为 CSS 选择器;ExtractKey 表示把读到的值
 // 存入凭据收集结果(envKey)。Index 表示多匹配元素取第几个(0 起):飞书
 // Secret 的「显示」按钮是同 class 的第 2 个(第 1 个是复制)。
 type Op struct {
-	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / readPage / extract / fill / screenshot / clickInRow
-	Target      string   // CSS 选择器(支持逗号分隔的多候选)或 URL 前缀(navigate/waitURL);clickInRow 时为「行」选择器
-	Text        string   // fill 的输入内容(支持 "$env:KEY");clickInRow 时为行内要点的按钮文本
+	Kind        string   // navigate / hover / click / waitVisible / waitURL / readText / readPage / copyToCred / extract / fill / screenshot / clickInRow
+	Target      string   // CSS 选择器(支持逗号分隔的多候选)或 URL 前缀(navigate/waitURL);clickInRow / copyToCred 时为「行/容器」选择器
+	Text        string   // fill 的输入内容(支持 "$env:KEY");clickInRow 时为行内要点的按钮文本;copyToCred 时为复制按钮选择器
 	ExtractKey  string   // readText 抽取到的值存入该 envKey
 	Index       int      // 多匹配时取第几个;0 取首个
 	MaskRune    rune     // readText 识别的掩码字符(0 表示用 defaultMaskRune)
@@ -239,13 +239,15 @@ var Portals = map[string]*Portal{
 			//   "应用凭证 App ID : <uuid> 原企业内部应用AgentId <num>
 			//    Client ID (原 AppKey 和 SuiteKey) <ding...>
 			//    Client Secret (原 AppSecret 和 SuiteSecret) 当前使用:xxxx****xxxx"
-			// Client ID 明文可读;Client Secret 只有掩码,平台不提供明文,纯 DOM 抓不到。
-			// 因此先自动切 tab 再读,并如实把掩码交给格式校验 → capture 降级
-			// set_credentials(只需用户补 Secret),绝不用掩码写 .env。
-			{ID: "collect-creds", Brief: "凭证与基础信息:读 Client ID / Client Secret", Cred: true,
+			// Client ID 明文可读;Client Secret **渲染成掩码**,但同一行右侧有
+			// aria-label=复制 的图标。2026-11-12 用户手工点该图标确认写入剪贴板的是
+			// **完整明文** —— 旧注释/文案把「渲染成掩码」误写成「平台不提供明文」,
+			// 且从没人点过复制按钮。现由 copyToCred 自动点复制并读回明文;
+			// 该自动路径尚未真机端到端验证,失败按 selector_miss 降级 set_credentials。
+			{ID: "collect-creds", Brief: "凭证与基础信息:读 Client ID / 复制 Client Secret 明文", Cred: true,
 				URLs: []string{"https://open-dev.dingtalk.com/"},
 				Browser: &BrowserAction{
-					Script: "dingtalk@2026-11-11-creds",
+					Script: "dingtalk@2026-11-12-creds",
 					Ops: []Op{
 						// 点进应用默认停在 /permission;先切到 /baseinfo 再读。
 						{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*凭证与基础信息\s*$`},
@@ -253,7 +255,10 @@ var Portals = map[string]*Portal{
 						{Kind: "waitVisible", Target: "body", Match: `应用凭证|Client\s*ID`},
 						{Kind: "readPage"},
 						{Kind: "extract", Target: `(?is)Client\s*ID[\s\S]{0,200}?\b(ding[A-Za-z0-9]{6,})\b`, ExtractKey: "DINGTALK_Client_ID"},
-						{Kind: "extract", Target: `(?is)Client\s*Secret[\s\S]{0,220}?([A-Za-z0-9_*\-]{16,})`, ExtractKey: "DINGTALK_Client_Secret"},
+						// 页面渲染的是掩码,复制图标给出的才是明文。Target 用 td/.app-info-item
+						// 缩小范围,Match 只匹配 Client Secret 块,避免误点 Client ID 的复制按钮。
+						{Kind: "copyToCred", Target: "td, .app-info-item, div", Match: `Client\s*Secret`,
+							Text: `[role="button"], button`, ExtractKey: "DINGTALK_Client_Secret"},
 					},
 				}},
 		},

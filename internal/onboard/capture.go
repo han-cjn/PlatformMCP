@@ -23,7 +23,7 @@ type CaptureResult struct {
 // 协议通道,会打脏协议帧),且含 prompt()/readHidden() 等阻塞读终端的逻辑。
 // 这里只执行凭据步骤里纯浏览器的 Ops,零终端交互、零 stdout 输出。
 //
-// 合规边界:只读取页面上已展示的 App ID / Secret,绝不代做登录或表单提交。
+// 合规边界:只读取页面上已展示的凭据、点击「复制」图标读回明文,绝不代做登录或表单提交。
 func Capture(platform string, reload func(map[string]string) error) (*CaptureResult, error) {
 	p, ok := FindPortal(platform)
 	if !ok {
@@ -103,7 +103,8 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 	if err := bx.RunAction(&BrowserAction{Script: act.Script, Ops: captureOps(act)}, env); err != nil {
 		res.Phase = "capture_failed"
 		res.Message = err.Error()
-		res.Next = "请确认停留在「凭证与基础信息」页,App ID 与 Secret 均可读;然后重试 hub.onboard.capture"
+		res.Next = "请确认停留在「凭证与基础信息」页、Client ID 明文与 Client Secret 的复制图标均可读;" +
+			"然后重试 hub.onboard.capture;若复制按钮定位持续失效,改用 hub.onboard.set_credentials"
 		return res, nil
 	}
 	for k, v := range bx.Collected {
@@ -119,8 +120,8 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 		res.Phase = capturePhase(ce.Phase)
 		res.Message = ce.Message
 		// 只回传「哪些字段已从页面成功读到」的键名,绝不回传值。
-		// 钉钉 /baseinfo 能读到 Client ID 明文,但 Client Secret 只有掩码,
-		// 让 Agent 明确知道只差一项,而不是笼统报 capture_failed。
+		// 钉钉 /baseinfo 的 Client ID 是明文;Client Secret 由 copyToCred 点复制
+		// 图标读明文,若只读到掩码则格式校验拒绝,让 Agent 明确知道只差一项。
 		for _, c := range PortalCreds[platform] {
 			v := strings.TrimSpace(env[c.EnvKey])
 			if v != "" && (c.Format == nil || c.Format(v) == nil) {
@@ -164,9 +165,10 @@ func captureNext(phase string, platform ...string) string {
 	switch phase {
 	case "incomplete":
 		if p == "dingtalk" {
-			return "钉钉「凭证与基础信息」页的 Client ID 是明文(见 collected),但 Client Secret 只显示掩码" +
-				"(实测 当前使用:xxxx****xxxx),平台不提供明文,纯 DOM 无法抓取;已拒绝把掩码写入 .env。" +
-				"请用表单只向用户索取 Client Secret,把 Client ID 与 Secret 一起交给 hub.onboard.set_credentials" +
+			return "钉钉「凭证与基础信息」页的 Client ID 是明文(见 collected);Client Secret 页面只显示" +
+				"掩码(当前使用:xxxx****xxxx),但右侧复制图标写入剪贴板的是完整明文(2026-11-12 用户手工实测)," +
+				"collect-creds 已改为自动点复制读明文。本次读到的仍不是合规明文(可能是掩码或复制按钮定位失效)," +
+				"已拒绝写入 .env。请用表单只向用户索取 Client Secret,把 Client ID 与 Secret 一起交给 hub.onboard.set_credentials" +
 				"完成格式校验→真连校验→写 .env→热重载;不要在回复里回显任何凭据值"
 		}
 		return "页面读取到的值缺失、疑似掩码或格式不符;" +

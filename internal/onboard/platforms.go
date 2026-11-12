@@ -29,7 +29,7 @@ var platformNames = map[string]string{
 
 var platformHints = map[string]string{
 	"feishu":       "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准",
-	"dingtalk":     "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准(dom_verified=true)。Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab;权限按真机 code 自动「立即开通」(已开通的行幂等跳过);版本在无待发布版本时创建 1.0.1 并保存为「开发中」草稿(已有待发布版本则跳过),但**刻意不自动点「发布」**——发布不可逆,需人工在后台确认。2026-11-12 真机已验证「保存」真实落库;历史三次失败根因已修:版本号/描述未真正填入、「保存」点击命中外层 div 容器。Client Secret 后台只显示掩码,需按 next 用 set_credentials 补一次",
+	"dingtalk":     "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准(dom_verified=true)。Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab;权限按真机 code 自动「立即开通」(已开通的行幂等跳过);版本在无待发布版本时创建 1.0.1 并保存为「开发中」草稿(已有待发布版本则跳过),但**刻意不自动点「发布」**——发布不可逆,需人工在后台确认。2026-11-12 真机已验证「保存」真实落库;历史三次失败根因已修:版本号/描述未真正填入、「保存」点击命中外层 div 容器。Client Secret 页面渲染成掩码,但复制图标写入剪贴板的是完整明文(2026-11-12 用户手工实测);collect-creds 已改为 copyToCred 自动点复制读明文,capture 可全自动拿全;该自动路径尚未真机端到端验证,失败按 next 降级 set_credentials",
 	"wecom":        "支持 Agent 自动创建智能机器人、抓凭据与启用;后台 DOM 未实测,selector_miss 时降级 set_credentials",
 	"tencent-docs": "授权页即凭据页,Agent 可自动读 Token 并完成接入;无需建应用/开权限/发布,DOM 未实测时降级 set_credentials",
 }
