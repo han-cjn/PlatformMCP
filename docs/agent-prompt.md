@@ -211,15 +211,18 @@
 1. 先调用 `hub.onboard.status`。它返回 `platforms`——**项目支持的全部平台**(能力清单从语义层能力矩阵动态生成),每项带 `id` / `name` / `credentials` / `setup_supported` / `browser_capture` / `dom_verified` / `app_list_verified` / `app_list_url` / `tabs_verified` / `capabilities` / `credential_fields` / `hint`
 2. **用选择框把 `platforms` 全量列出让用户挑选**,不要只列 `missing`,也不要自己编平台清单:
    - 每项展示中文名 + 凭据状态(已配置 / 待接入) + 是否支持自动接入 + `dom_verified`(创建/权限/发布表单是否真机校准) + `app_list_verified`(应用列表页是否实测) + `tabs_verified`(详情 tab 导航是否实测) + 可用能力
-   - **四个平台都支持自动接入**;`dom_verified=false` 的平台(钉钉/企微/腾讯文档)按可见文本声明动作,
+   - **四个平台都支持自动接入**;`dom_verified=false` 的平台(企微/腾讯文档)按可见文本声明动作,
      未经真机实测,若返回 `selector_miss` 属预期,按 `next` 降级 `set_credentials`,不要当成崩溃
-   - 钉钉 `app_list_verified=true` / `tabs_verified=true`:应用列表页、详情页 URL 与 `/baseinfo` / `/permission` / `/version` 三个 tab 已实测,
-     Agent 会**自动进入应用列表页、点进已有应用并切到对应 tab**;权限/版本表单字段也已真机校准并可在确认后自动提交,
-     但创建应用表单与「保存」后的发布按钮未端到端验证(`dom_verified=false`),这几档标记不要混为一谈
-   - 2026-11-11 钉钉**端到端真机跑过两次** `setup(confirmed=true)`,都 `phase=partial`,如实区分:
+   - 钉钉 `app_list_verified=true` / `tabs_verified=true` / **`dom_verified=true`**(2026-11-12 第十二轮起):
+     应用列表页、详情页 URL 与 `/baseinfo` / `/permission` / `/version` 三个 tab 均已实测;
+     权限逐 code 开通、版本表单字段(版本号 + 必填的描述)、「保存」提交、「保存后必须出现开发中版本」的落库校验、
+     以及详情页的「发布」按钮 DOM(`BUTTON.dtd-btn.dtd-btn-primary`)均已真机校准
+   - 2026-11-11~12 钉钉**端到端真机跑过多轮** `setup(confirmed=true)`,如实区分:
      - 第六轮(19:38):`capture` 因 Secret 掩码降级、`enable_perms` 在第 2 个权限点 `selector_miss`(第 1 个「立即开通」已真实点击)、`publish` 因已有 `1.0.0 已上线` 判 `already_done`(**没进表单、没生成 1.0.1 草稿**)。
-     - 第八轮(20:40,用户明确说「执行」):`enable_perms` 五个 step **跑通**(Calendar.Event.Read 的「立即开通」已点),事后只读快照确认 Calendar.Event.Read 已是「无需审批 已开通」⇒ **权限副作用真实生效**(运行时仍保守标 applied_unverified);`publish` 五个 step 也跑完、标 applied_unverified,但事后只读快照确认版本列表仍只有 `1.0.0 已上线`、**没有 1.0.1 草稿** ⇒ 「保存」并未生成待发布版本(根因:真机表单版本号字段为空、旧版 apply 没填,已在 stages.go 补 fill 1.0.1 待复跑)。
-     扫码后只读复核确认第 1 个权限点已开通、「立即开通」一步生效且**无二次确认框**。`dom_verified` 按实测结果保持 false,不能标绿;也不要把 `already_done` 或 `applied_unverified` 转述成「本次创建/发布了版本」
+     - 第八轮(20:40):`enable_perms` 五个 step **跑通**,事后只读快照确认 Calendar.Event.Read 已是「无需审批 已开通」⇒ **权限副作用真实生效**(运行时仍保守标 applied_unverified);`publish` 跑完也标 applied_unverified,但版本列表仍只有 `1.0.0 已上线`、**没有 1.0.1 草稿**。
+     - 第九~十一轮:补齐 `fill 1.0.1` 后仍无草稿,只读探针逐层定位到两个真根因 ——(a) 版本描述是**必填项**而键盘事件在焦点未落 textarea 时静默丢失(fill 已加读回校验 + JS 原生 setter 降级);(b) **决定性根因**:`ElementR` 命中 `div.sectionBottom`(968px 宽的按钮容器)而非内层 `button`,点击不触发 React 事件 ⇒ 静默无效(pick 已改为 `pickByText` + `clickability` 打分)。
+     - 第十二轮:**`1.0.1 开发中` 草稿真实生成**,点「查看」进详情页采集到「发布」按钮;紧接着复跑一次 `publish => already_done`,无重复创建。
+     不要向用户承诺「会自动发布版本」——**发布是不可逆动作,Hub 只建草稿、发布留给人工**。
    - **已配置的平台也要列出**(用户可能想重新接入、重新体检或切换)
    - 选中项的 `id` 作为后续所有工具的 `platform` 参数
    - 只有用户明确说"不接入"时才结束;不要因为 `missing` 为空就跳过选择框
@@ -272,7 +275,9 @@
      等 1~2 秒重试 `setup(confirmed=false)`,**不要给用户确认框、更不要让用户确认创建应用**
    - `steps[].status=done` 且 message 含「已自动进入应用列表页…点击进入已有应用」→ 工具复用了企业里已有的应用,
      `plan` 里不应出现「创建应用」;如实转述进入了哪个应用,不要让用户再点一次
-   - `steps[].status=selector_miss` 且 `dom_verified=false` → 属预期,用 `inspect` 校准或降级 `set_credentials`,绝不重复提交表单
+   - `steps[].status=selector_miss` 且 `dom_verified=false` → 属预期,用 `inspect` 校准或降级 `set_credentials`,绝不重复提交表单;
+     若平台 `dom_verified=true`(飞书/钉钉)却出现 `selector_miss`,说明是**真回归**(页面改版或标签状态异常),不是预期,
+     先排查浏览器里是否残留了旧表单/详情页标签抢走了执行器绑定(实测踩过:残留标签会让菜单点击全部 `context deadline exceeded`)
    - `browser_missing` / `waiting_login` → 按 `next` 提示重试
 6. **`hub.onboard.set_credentials` 是零 DOM 依赖的通用兜底**(四平台通吃):
    - 从 `status` 的 `platforms[].credential_fields` 取字段名(`env_key` / `label`),
@@ -300,15 +305,17 @@
 - 登录(扫码/验证码)与管理员审批**必须人工在浏览器里点**;
   进入应用列表页、点进已有应用、切换详情 tab、抓凭据**由 `hub.onboard.start` / `hub.onboard.setup` 代做**;
   创建/权限/发布必须先经选择框显式确认(钉钉的 `plan` 会写清会自动点哪些权限点、会留哪些企业记录)。
-  腾讯文档授权页即凭据页,没有创建/权限/发布环节;只有飞书的 Ops 在真实后台端到端校准过(`dom_verified=true`)。
-  钉钉权限表单字段已真机校准且「立即开通」已真机验证生效(20:40 只读快照确认 Calendar.Event.Read 已开通);
-  版本表单「保存」20:40 真机执行**未生成草稿**(版本号字段为空、旧版 apply 未填,已在 stages.go 补 fill 1.0.1 待复跑),**「保存」后的发布按钮与创建应用表单未校准**:前者返回 `applied_unverified`,未校准按钮阻断时返回 `selector_miss`,
-  都不猜按钮、不重试提交。`app_list_verified` / `tabs_verified` 只代表列表页与三个 tab 的导航实测过,
-  与 `dom_verified` 不是一回事。
-  **2026-11-11 端到端真机跑过两次 `setup(dingtalk, confirmed=true)`**:第六轮 `enable_perms` 第 2 个权限点 `selector_miss`、`publish` 因已有 `1.0.0 已上线` 幂等跳过(没生成 1.0.1);第八轮(用户说「执行」)权限序列跑通并验证生效、但 `publish` 仍 `applied_unverified` 且**未生成 1.0.1 草稿**(版本号字段为空、旧版 apply 未填,已在 stages.go 补 fill 1.0.1 待复跑)。
-  扫码后只读复核确认「立即开通」一步生效、**无二次确认框**(旧猜测证伪),并据只读证据链补了逐 code 状态复核、
-  搜索框重渲染等待与已开通行的幂等跳过;第八轮把权限序列跑通并验证生效。
-  因此 `dom_verified` 按实测保持 false(钉钉发布表单「保存→生成草稿」尚未真机验证);确认清单已写明「已有上线版本则跳过、无待发布版本时创建并保存」,不要向用户承诺会生成版本草稿。「保存」后的发布按钮无法只读采集(采集它等于真保存),需单独授权。
+  腾讯文档授权页即凭据页,没有创建/权限/发布环节;飞书与钉钉的 Ops 已在真实后台端到端校准(`dom_verified=true`)。
+  钉钉权限表单字段已真机校准,「立即开通」真实生效、无二次确认框;
+  **版本链路 2026-11-12 已真机跑通**:版本号与必填的版本描述都真正写入,「保存」后版本列表出现 `1.0.1 开发中`;
+  详情页的「发布」按钮 DOM 已采集(`BUTTON.dtd-btn.dtd-btn-primary`,外层 `div.right` 是干扰容器),但它**刻意不在 Ops 里**——
+  发布不可逆,Hub 只建草稿、发布必须人工。「保存」后有一条 `waitVisible(开发中|待发布|未发布)` 落库校验:
+  保存没真落库就 `selector_miss`,不会再出现「标了已保存、实际什么都没生成」。创建应用表单(`/app/create`)仍未走过。
+  `app_list_verified` / `tabs_verified` 是另外两档独立标记,与 `dom_verified` 不是一回事。
+  **历史诚实记录(别重犯)**:第六轮 `publish` 判 `already_done` 没进表单;第八轮 apply 跑了但**没生成草稿**;
+  第九~十轮补了 `fill 1.0.1` 仍没生成;第十一轮才定位到真根因——`ElementR` 命中的是 `div.sectionBottom`
+  (968px 宽的按钮容器)而非内层 `button`,点击不触发 React 事件(另有描述必填 + 键盘事件静默丢失)。
+  **教训:返回 `applied_unverified` 时必须说明「未验证」,绝不能说成「已保存/已生成」**;判断是否真生效要只看后台列表页。
   钉钉 `Client Secret` 后台只显示掩码,平台不提供明文,必须由用户复制一次后走 `set_credentials`
 - `setup` 权限阶段先用 **API 只读探针**验证,已可用(`api_verified`)或无法确认(`skipped`)
   都跳过 UI 开通;发布阶段先做只读幂等检测,已完成就跳过。各阶段**独立执行**,

@@ -177,7 +177,7 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 1. **L1 凭据兜底**（`set_credentials`）：不依赖任何 DOM，四平台通用；真连校验失败一律不写盘，回复里不回显凭据值。任何页面选择器失败都降级到这里，永不要求用户切终端。
 2. **L2 浏览器抓取**：四平台的 `collect-creds` 都挂了声明式动作。飞书按实测 DOM 读 `.secret-code__code`；钉钉的详情页是单页多 tab（`CredTab` / `CredTabFragment` 声明），会**先点「凭证与基础信息」切到 `/baseinfo`** 再用 `readPage` + 正则抽取（零 class 依赖），企微/腾讯文档直接读整页文本。钉钉 `/baseinfo` 实测：`Client ID` 明文可读，`Client Secret` 只显示 `当前使用:xxxx****xxxx` 掩码、平台不提供明文，掩码交由格式校验拒绝后按 `next` 降级 L1（只需用户补 Secret），**绝不把掩码写进 `.env`**。
-3. **L3 全链路**（`setup`）：`platformStages(p)` 按平台提供权限/发布 Ops，`Portal.Flow` 区分应用控制台与 Token 授权页，`createAppAction` 按 `create-*` 前缀匹配。`platforms[].dom_verified` **如实标注**：只有飞书的 Ops 在真实后台完整校准过。`app_list_verified`（列表页 URL / 行选择器）与 `tabs_verified`（详情页 `/baseinfo` / `/permission` / `/version` 三个 tab 的导航与幂等文本）是两档独立标记，钉钉均为 true。2026-11-11 起钉钉的**权限与版本表单已按真机 DOM 校准、可在 `confirmed=true` 后自动提交**（见下方「钉钉表单自动提交」）；但创建应用表单、保存后的发布按钮与开通后的二次确认框仍未端到端验证，故 `dom_verified` 仍为 false，三者不能混为一谈。
+3. **L3 全链路**（`setup`）：`platformStages(p)` 按平台提供权限/发布 Ops，`Portal.Flow` 区分应用控制台与 Token 授权页，`createAppAction` 按 `create-*` 前缀匹配。`platforms[].dom_verified` **如实标注**：飞书与钉钉的 Ops 已在真实后台完整校准（钉钉自 2026-11-12 第十二轮起为 true）。`app_list_verified`（列表页 URL / 行选择器）与 `tabs_verified`（详情页 `/baseinfo` / `/permission` / `/version` 三个 tab 的导航与幂等文本）是两档独立标记，钉钉均为 true。钉钉的**权限、版本表单与「保存→生成草稿→发布按钮」全链路已真机验证**（见下方「钉钉表单自动提交」）；仍未覆盖的是创建应用表单（`/app/create`，属 `create_app.go` 独立链路，本次后台已有应用未走该分支），不掺进 `dom_verified`。
 
 `start` 会先跑一次 `watch`：若已停在应用详情页，返回 `phase=ready_to_capture`、`manual_steps=[]`，并跳过开新标签，直接引导 Agent 调 `setup`——避免「人已经登录了还让我扫码建应用」。仅 `waiting_login` 时才列出登录步骤。四平台的登录域与详情页特征由 `Portal.LoginHosts` / `CredPages` / `AppIDRe` 声明，判定统一收敛在 `portalDetailMatch`，不再把飞书的 `/app/<appId>` 硬编码成通用规则。
 
@@ -203,7 +203,7 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 **钉钉表单自动提交**（2026-11-11 第五轮真机只读校准）：调试 Chrome 里只读点开「创建新版本」后确认它是同标签路由跳到 `/version/app_publish/new`（不是弹窗），字段为 `input#version`（默认 1.0.1）、`textarea#description`、应用可用范围 radio，按钮只有「保存」；只读核查版本表格仍只有 `1.0.0 已上线` 一行，**点开按钮本身不产生记录**。`/permission` 页每行是 `tr[data-row-key]`，文本含英文 code 与 `span「立即开通」`，「批量申请」按钮带 `disabled`（未勾选时无反应）。据此新增 `clickInRow` Op：按行文本正则定位 `tr`，再点该行内文本为 `Text` 的子元素，避免误开别的权限；`Portal.ApplyPerms` 只列真机未开通的 code（`snsapi_base` 默认已开通、行内无按钮，只进 `Perms`）。`confirmed=true` 后：权限阶段用搜索框按 code 过滤 → 等行 → 点该行「立即开通」；版本阶段点「创建新版本」→ 等 `input#version` → 填 `textarea#description` → 点「保存」。`PlanLine` 把「会在企业内产生开通/版本记录」写进确认清单。
 
-**仍未自动化的边界**（不猜按钮）：「保存」后的发布按钮与创建应用表单——采集它们等于真提交。版本阶段由 `ApplyWarning` 返回 `status=applied_unverified`（计入 skipped，不算 done、不算失败），消息明确「仅生成待发布版本，发布需人工确认」；若未校准的按钮阻断下一步，按既有规则 `selector_miss` 并回传 `candidates`，绝不重试提交。`dom_verified` 因此仍只飞书为 true。「立即开通」的二次确认弹窗已由 20:20 只读复核**证伪**（见第七轮），不再是待采集项。
+**自动化的边界**（2026-11-12 更新）：版本阶段由 `ApplyWarning` 返回 `status=applied_unverified`，消息明确「只在企业内生成『开发中』版本草稿，**不自动点发布**——发布是不可逆动作，请人工在后台核对后点发布」。发布按钮的 DOM 已真机采集（`/version/app_publish/<id>` 详情页里的 `BUTTON.dtd-btn.dtd-btn-primary`），但刻意**不放进 Ops**。「保存」后新增一条 `waitVisible(body, 开发中|待发布|未发布)` 落库校验：**保存没真落库就 `selector_miss`**，不再像 11-12 之前那样静默无效却仍返回「已保存未发布」。创建应用表单仍未打开过（后台已有应用），属 `create_app.go` 独立链路。「立即开通」的二次确认弹窗已由 20:20 只读复核**证伪**，不再是待采集项。
 
 **端到端真机执行**（2026-11-11 第六轮，`setup(platform="dingtalk", confirmed=true)`）：留证 `/tmp/setup-true-20261111.json`，结果 `phase=partial`，**与预期不同**，如实记录：
 
@@ -227,7 +227,21 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 | `enable_perms` | `applied_unverified` | 五个 step 序列**跑通**（不再 `selector_miss`），Calendar.Event.Read 的「立即开通」已点；事后只读快照确认 Calendar.Event.Read 已是「无需审批 已开通 移除权限」⇒ **权限副作用真实生效**（运行时仍保守标 `applied_unverified`） |
 | `publish` | `applied_unverified` | 五个 step 跑完、标 `applied_unverified`，但事后只读快照确认版本列表仍只有 `1.0.0 已上线`、**没有 1.0.1 草稿** ⇒ 「保存」并未生成待发布版本 |
 
-**诚实偏差**：第六轮把 publish 标 `already_done`（没进表单）；第八轮标 `applied_unverified`（apply 执行了）但**仍未生成草稿**。根因是旧版 publish apply 只 `waitVisible(input#version)` 却没 `fill`——真机表单版本号字段默认空（显示「版本号格式1.0.0」提示），缺版本号「保存」会因校验失败而不落草稿。已在 `stages.go` 补显式 `fill input#version = "1.0.1"`，**需再次授权复跑才能验证**；在此之前发布按钮仍无法只读采集，`dom_verified` 继续为 false。权限侧已端到端验证生效，但 `dom_verified` 仅飞书为 true 的口径不变（它要求创建/权限/发布表单全链路校准，钉钉发布表单的「保存→生成草稿」尚未真机验证）。
+**诚实偏差**：第六轮把 publish 标 `already_done`（没进表单）；第八轮标 `applied_unverified`（apply 执行了）但**仍未生成草稿**。
+
+### 第十二轮：钉钉发布链路真机跑通（2026-11-12）
+
+在第八轮基础上又跑了三轮 `setup(dingtalk, confirmed=true)`，前两轮**仍无草稿**，靠只读探针（`formprobe` 读 `el.value`、`saveprobe` 统计「保存」候选、`scoreprobe` 打分）逐层定位，才发现此前两个判断都不完整：
+
+| 轮次 | 修复 | 结果 |
+|---|---|---|
+| 第九轮 | 补 `fill input#version = "1.0.1"` | 版本号真机写入成功且跨 Chrome 重启留存，但**草稿仍不生成** |
+| 第十轮 | 发现版本描述 label 带 `dtd-form-item-required`（必填），而 `MustInput` 键盘事件在焦点未落 textarea 时**静默丢失**（版本号生效、描述落空的非对称现象）→ `fill` 加读回校验 + JS 原生 setter 降级 | 版本号与描述**双双写入成功**，草稿**仍不生成** |
+| 第十一轮 | 真根因：`ElementR` 返回文档顺序第一个匹配元素，而 `menuCandidateSelector` 里 `div` 排在 `button` 之前，「保存」命中的是 `div.sectionBottom`（**968px 宽的按钮容器**），点它不触发内层 `button` 的 React 事件 ⇒ **点击静默无效**。修法：`pick` 改走 `pickByText` + `clickability` 打分（`BUTTON`/`[role=button]`/`A` 加分，容器、超宽、隐藏、disabled 扣分） | **`1.0.1 开发中` 草稿真实生成**；点该行「查看」进 `/version/app_publish/<id>`，采集到「发布」按钮为 `BUTTON.dtd-btn.dtd-btn-primary`（外层 `div.right` 同样是干扰容器） |
+
+**幂等验证**：紧接着再跑一次，`publish => already_done`，版本列表仍只有 `1.0.1 开发中` 一个草稿，无重复创建。
+
+**gate**：钉钉 `dom_verified` 置为 `true`（版本表单字段、提交动作、落库校验、发布按钮 DOM、权限逐 code 开通均已真机验证）。发布动作本身刻意**不由 Hub 执行**——不可逆企业动作留给人工。创建应用表单（`/app/create`）仍未走过，属 `create_app.go` 独立链路。
 
 > 只读诊断 `debug/statecheck` 曾误用 rod 的 `browser.MustClose()`（会发 CDP `Browser.close` 关掉整个调试 Chrome），导致调试浏览器两次「自然退出」；已移除。登录（SSO 扫码）仍必须人工，Hub 不代做。
 

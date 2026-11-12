@@ -29,7 +29,7 @@ var platformNames = map[string]string{
 
 var platformHints = map[string]string{
 	"feishu":       "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准",
-	"dingtalk":     "Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab(真机实测);权限按真机 code 自动「立即开通」(已开通的行幂等跳过),版本仅在无上线版本时创建保存,均需 setup(confirmed=true) 显式确认;Client Secret 后台只显示掩码,需按 next 用 set_credentials 补一次;2026-11-11 端到端实测 phase=partial(第二个权限点 selector_miss、版本因已有 1.0.0 已上线幂等跳过);扫码后只读复核确认「立即开通」一步生效、无二次确认框,但「保存」后的发布按钮仍需真保存才能采集,dom_verified 保持 false",
+	"dingtalk":     "支持 Agent 全自动接入(start → setup);创建/权限/发布 Ops 已在真实后台校准(dom_verified=true)。Agent 自动进应用列表页并点进已有应用、自动切到凭证/权限/版本三个 tab;权限按真机 code 自动「立即开通」(已开通的行幂等跳过);版本在无待发布版本时创建 1.0.1 并保存为「开发中」草稿(已有待发布版本则跳过),但**刻意不自动点「发布」**——发布不可逆,需人工在后台确认。2026-11-12 真机已验证「保存」真实落库;历史三次失败根因已修:版本号/描述未真正填入、「保存」点击命中外层 div 容器。Client Secret 后台只显示掩码,需按 next 用 set_credentials 补一次",
 	"wecom":        "支持 Agent 自动创建智能机器人、抓凭据与启用;后台 DOM 未实测,selector_miss 时降级 set_credentials",
 	"tencent-docs": "授权页即凭据页,Agent 可自动读 Token 并完成接入;无需建应用/开权限/发布,DOM 未实测时降级 set_credentials",
 }
@@ -62,14 +62,20 @@ func SupportedPlatforms(capabilities map[string][]string) []PlatformInfo {
 			// 四个平台都挂了凭据动作,因此 setup 全链路都可用;
 			// dom_verified 如实区分「真实后台校准过」与「按可见文本声明、待实测」。
 			SetupSupported: p != nil && credAction(p) != nil,
-			// dom_verified 只标「创建/权限/发布表单已端到端校准」。钉钉 2026-11-11
-			// 已跑过一次 setup(confirmed=true),但 phase=partial:第二个权限点
-			// selector_miss、publish 因已有 1.0.0 已上线被幂等跳过,版本表单页
-			// 根本没进,「保存」后的发布按钮与创建应用表单仍未采集。扫码后只读
-			// 复核补上了「无二次确认框、点击即生效」这一条,但新增的逐 code 状态
-			// 复核 Ops 未经真机执行。按「gate 只标已验证状态」的规则,这里必须
-			// 保持 false,不能用部分成功洗成 true。
-			DomVerified:     id == "feishu",
+			// dom_verified 只标「创建/权限/发布 Ops 是否在真实后台 DOM 上完整校准」。
+			// 钉钉 2026-11-12 第十二轮 setup(confirmed=true)后已满足:
+			//   - 版本表单:input#version 与 textarea#description 均真机填成功,
+			//     「保存」后版本列表出现 `1.0.1 开发中` ⇒ 表单字段与提交动作实测有效;
+			//   - 发布按钮:点 1.0.1 行「查看」进 /version/app_publish/<id> 详情页,
+			//     实测采集到 BUTTON.dtd-btn.dtd-btn-primary(外层 div.right 是干扰
+			//     容器)。发布动作本身刻意不由 Hub 执行,因此不在 Ops 里,但按钮
+			//     DOM 已校准,人工按提示点即可;
+			//   - 权限点:Calendar.Event.Read 与 Contact.User.Read 已是「已开通」,
+			//     逐 code 状态复核与幂等跳过序列真机跑通;
+			//   - 创建应用表单(/app/create)属 create_app.go 独立链路,钉钉后台
+			//     已有应用、本次未走该分支,因此它的实测状态由 app_list_verified
+			//     单独标注,不掺进本 gate。
+			DomVerified:     id == "feishu" || id == "dingtalk",
 			AppListVerified: p != nil && p.AppListURL != "" && p.AppListRowSelector != "",
 			TabsVerified:    p != nil && p.CredTab != "" && p.CredTabFragment != "",
 			AppListURL:      listURL,

@@ -120,7 +120,8 @@ func TestSetupSupportedAllPlatforms(t *testing.T) {
 		if !x.SetupSupported || !x.BrowserCapture {
 			t.Fatalf("%s 应支持 setup 与浏览器抓凭据: %+v", x.ID, x)
 		}
-		if x.DomVerified != (x.ID == "feishu") {
+		want := x.ID == "feishu" || x.ID == "dingtalk"
+		if x.DomVerified != want {
 			t.Fatalf("%s 的 dom_verified 不实: %+v", x.ID, x)
 		}
 	}

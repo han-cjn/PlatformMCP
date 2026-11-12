@@ -41,12 +41,14 @@ func TestSupportedPlatformsFullList(t *testing.T) {
 			t.Fatalf("%s 缺少 credential_fields: %+v", p.ID, p)
 		}
 	}
-	// L3 后 setup 链路四平台全量可用;dom_verified 只对真机校准过的飞书为真。
+	// L3 后 setup 链路四平台全量可用;dom_verified 只对真机校准过的飞书、钉钉为真
+	// (钉钉 2026-11-12 第十二轮跑通版本表单+发布按钮采集后置 true)。
 	for _, p := range got {
 		if !p.SetupSupported {
 			t.Fatalf("%s 的 setup 链路应可用: %+v", p.ID, p)
 		}
-		if p.DomVerified != (p.ID == "feishu") {
+		want := p.ID == "feishu" || p.ID == "dingtalk"
+		if p.DomVerified != want {
 			t.Fatalf("%s 的 dom_verified 不实: %+v", p.ID, p)
 		}
 	}

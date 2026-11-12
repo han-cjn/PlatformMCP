@@ -258,13 +258,16 @@ func TestProbePermsUnverifiedPerPlatform(t *testing.T) {
 	}
 }
 
-// gate 只标已验证项:tab 导航实测过,但创建/权限/发布表单仍未校准。
+// gate 只标已验证项。2026-11-12 第十二轮真机跑通后,钉钉的 tabs + 版本表单
+// (版本号/描述/保存/落库校验/发布按钮 DOM)+ 权限逐 code 开通都已实测,
+// 因此 tabs_verified 与 dom_verified 都为 true;企微/腾讯文档仍未实测。
 func TestSupportedPlatformsTabsVerified(t *testing.T) {
 	for _, x := range SupportedPlatforms(nil) {
 		if x.TabsVerified != (x.ID == "dingtalk") {
 			t.Fatalf("%s 的 tabs_verified 不实: %+v", x.ID, x)
 		}
-		if x.DomVerified != (x.ID == "feishu") {
+		want := x.ID == "feishu" || x.ID == "dingtalk"
+		if x.DomVerified != want {
 			t.Fatalf("%s 的 dom_verified 不实: %+v", x.ID, x)
 		}
 	}
@@ -321,6 +324,12 @@ func TestDingtalkApplyOpsUseRealFormFields(t *testing.T) {
 	for _, op := range pubApply {
 		matches += op.Match + "|"
 		full += op.Kind + "|" + op.Target + "|" + op.Text + "\n"
+		// 只对「会真的点下去」的 op 做禁词检查:waitVisible/readPage 的 Match 是
+		// 页面文本判定,「开发中|待发布|未发布」这类状态词里天然含「发布」二字,
+		// 拿禁词一刀切会误判(2026-11-12 踩到)。
+		if op.Kind != "click" && op.Kind != "clickInRow" {
+			continue
+		}
 		for _, bad := range []string{"发布", "确定", "提交", "申请"} {
 			if strings.Contains(op.Match, bad) {
 				t.Fatalf("版本 apply 含未真机校准的按钮 %q: %+v", bad, op)
@@ -332,12 +341,21 @@ func TestDingtalkApplyOpsUseRealFormFields(t *testing.T) {
 			t.Fatalf("版本 apply 缺真机按钮 %q: %s", want, matches)
 		}
 	}
+	// 「保存」必须带「落库校验」:11-12 之前的三个版本都是保存静默无效却仍返回
+	// applied_unverified,用户看到「已保存未发布」而实际什么都没生成。这条
+	// waitVisible 是防止再给出与事实不符的表述。
+	if !strings.Contains(matches, "开发中|待发布|未发布") {
+		t.Fatalf("版本 apply 缺「保存后必须出现待发布版本」的落库校验: %s", matches)
+	}
 	for _, want := range []string{"input#version", "textarea#description"} {
 		if !strings.Contains(full, want) {
 			t.Fatalf("版本 apply 缺真机表单字段 %q: %s", want, full)
 		}
 	}
-	if !strings.Contains(pub.ApplyWarning, "发布") || !strings.Contains(pub.ApplyWarning, "不自动点击") {
+	// 发布边界必须写明「只建草稿、发布动作留给人工」——发布是不可逆企业动作。
+	if !strings.Contains(pub.ApplyWarning, "发布") ||
+		!strings.Contains(pub.ApplyWarning, "不可逆") ||
+		!strings.Contains(pub.ApplyWarning, "人工") {
 		t.Fatalf("未如实标注发布按钮边界: %q", pub.ApplyWarning)
 	}
 	failed, skipped := setupStageOutcomes([]SetupStep{
@@ -383,12 +401,18 @@ func TestDingtalkE2EResultIsHonest(t *testing.T) {
 	if !strings.Contains(pub.PlanLine, "已存在待发布版本则跳过") {
 		t.Fatalf("确认清单必须写明「已存在待发布版本则跳过」,避免确认门失真: %q", pub.PlanLine)
 	}
-	// 「保存」后的发布按钮与创建应用表单仍未采集,dom_verified 必须保持 false。
-	// 二次确认框已由 20:20 只读复核证伪(点击即生效、无弹窗),不再作为理由。
+	// 2026-11-12 第十二轮真机已跑通:版本列表出现「1.0.1 开发中」⇒「保存」真实
+	// 落库,且详情页采集到 BUTTON.dtd-btn.dtd-btn-primary 的「发布」按钮。因此
+	// 钉钉 dom_verified 可以置 true。仍未覆盖的是创建应用表单(/app/create),
+	// 它属 create_app.go 独立链路,由 app_list_verified 单独标注。
 	for _, p := range SupportedPlatforms(nil) {
-		if p.ID == "dingtalk" && p.DomVerified {
-			t.Fatal("端到端未跑通(版本表单没进、发布按钮没采集),钉钉 dom_verified 不能置 true")
+		if p.ID == "dingtalk" && !p.DomVerified {
+			t.Fatal("版本表单与发布按钮均已真机校准,钉钉 dom_verified 应为 true")
 		}
+	}
+	// 幂等边界:列表里已存在「1.0.1 开发中」时,publish 必须判已完成、不再重复建版本。
+	if !pub.Done(dingVersionTextWithDraft) {
+		t.Fatal("已有待发布版本时 publish 应判已完成,否则会重复创建草稿")
 	}
 }
 

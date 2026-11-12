@@ -35,14 +35,27 @@ import (
 //     权限副作用**真实生效**(运行时仍保守标 applied_unverified,但 DOM 已证);
 //     publish 五个 step 也跑完、标 applied_unverified,但事后只读快照确认版本列表
 //     仍只有 1.0.0 已上线、**没有 1.0.1 草稿** ⇒ 「保存」并未生成待发布版本。
-//     根因:真机表单版本号字段为空(显示「版本号格式1.0.0」提示),旧版 apply 只
-//     waitVisible(input#version) 却没 fill,「保存」因缺版本号校验失败。已补显式
-//     fill 1.0.1(见 publish Ops),但需再次授权复跑才能验证。
+//   - 11-12 第十/十一轮:补齐 fill 1.0.1 后仍无草稿,只读探针定位到两个真根因:
+//     (a) 描述是必填项,而 MustInput 的键盘事件在焦点未落入 textarea 时静默
+//     丢失(版本号 fill 生效、描述落空),已在 browser.go 的 fill 加读回校验 +
+//     JS 原生 setter 降级;
+//     (b) 决定性根因:ElementR 返回文档顺序第一个匹配元素,而
+//     menuCandidateSelector 里 div 排在 button 之前,「保存」命中的是
+//     div.sectionBottom(968px 宽的按钮容器),点它不触发内层 button 的 React
+//     事件 ⇒ 点击静默无效。已在 pick 加 pickByText/clickability 打分,优先
+//     选 BUTTON/[role=button]/A,容器与隐藏节点扣分。
+//   - 11-12 第十二轮 setup(dingtalk, confirmed=true):publish 跑通,版本列表出现
+//     `1.0.1 开发中` 草稿⇒「保存」真实生效;点 1.0.1 行的「查看」进详情页
+//     (/version/app_publish/<versionID>),采集到「发布」按钮为
+//     BUTTON.dtd-btn.dtd-btn-primary(外层 div.right 同样是干扰容器,老逻辑
+//     会点错)。发布动作本身仍需人工确认,不由 Hub 自动点击。
 //
-// 「保存」后的「发布」按钮只在存在「待发布」版本时才出现;20:40 既然没生成草稿,
-// 它就仍采集不到(采集它等于真保存/真发布,绝不在未授权时点击)。创建应用表单也未
-// 打开过,因此 dom_verified 仍保持 false;已实测部分由 app_list_verified /
-// tabs_verified 单独标注,未验证边界由 ApplyWarning / PlanLine 如实回传。
+// 「保存」后的「发布」按钮只在存在「待发布」版本时才出现。2026-11-12 第九轮
+// 真机已越过这一步并采集到它(见下方 publish Ops 注释),因此该按钮不再属于
+// 「未校准」范围;仍未打开过的是创建应用表单(/app/create),它由 create_app.go
+// 单独承担,不在本函数的阶段里。dom_verified 的判定口径见 platforms.go。
+// 已实测部分另由 app_list_verified / tabs_verified 标注,未验证边界由
+// ApplyWarning / PlanLine 如实回传。
 func platformStages(p *Portal) []setupStage {
 	if p == nil {
 		return nil
@@ -181,7 +194,12 @@ func dingtalkStages() []setupStage {
 		},
 		{
 			ID: "publish",
-			Action: &BrowserAction{Script: "dingtalk@2026-11-11-publish", Ops: []Op{
+			// 2026-11-12 第十二轮真机跑通并采集到「发布」按钮,但它刻意不在 Ops 里:
+			// 发布是不可逆的企业动作,Hub 只负责把版本草稿建好,由人工在后台点发布。
+			// 详情页路径:/version/app_publish/<versionID>;按钮为
+			// BUTTON.dtd-btn.dtd-btn-primary,外层包着 div.right 干扰容器
+			// (老 ElementR 会点错,现由 pickByText/clickability 规避)。
+			Action: &BrowserAction{Script: "dingtalk@2026-11-12-publish", Ops: []Op{
 				{Kind: "waitVisible", Target: menuCandidateSelector, Match: `^\s*版本管理与发布\s*$`, Scope: "probe"},
 				{Kind: "click", Target: menuCandidateSelector, Match: `^\s*版本管理与发布\s*$`, Scope: "probe"},
 				{Kind: "waitVisible", Target: "body", Match: `版本状态|创建新版本`, Scope: "probe"},
@@ -189,34 +207,40 @@ func dingtalkStages() []setupStage {
 				{Kind: "click", Target: menuCandidateSelector, Match: `^\s*创建新版本\s*$`, Scope: "apply"},
 				{Kind: "waitVisible", Target: "input#version", Scope: "apply"},
 				// 真机表单版本号字段默认空(显示「版本号格式1.0.0」提示),不填版本号「保存」
-				// 会因校验失败、不生成草稿。20:40 真机执行就栽在这里:apply 只 waitVisible
-				// 了 input#version 却没 fill,事后只读快照确认版本列表仍只有 1.0.0 已上线、
-				// 没有 1.0.1 草稿。
-				// 2026-11-12 复跑(fill 1.0.1 已生效并跨重启留存)仍无草稿,只读探针定位到
-				// 第二根因:版本描述 label 带 dtd-form-item-required,是必填项;而执行器
-				// MustInput 的键盘事件在焦点未落入 textarea 时静默丢失(版本号 fill 生效、
-				// 描述 fill 落空)。browser.go fill 已加「读回校验 + JS 原生 setter 降级」,
-				// 本阶段两条 fill 都会自动走对路径,但仍需再次授权复跑验证。
+				// 会因校验失败、不生成草稿(20:40 就栽在这里)。
+				// 版本描述同样必填(label 带 dtd-form-item-required),而 MustInput 的键盘
+				// 事件在焦点未落入 textarea 时静默丢失(11-12 实测:版本号生效、描述落空)。
+				// browser.go 的 fill 已加「读回校验 + JS 原生 setter 降级」兜住这一点。
 				{Kind: "fill", Target: "input#version", Text: "1.0.1", Scope: "apply"},
 				{Kind: "fill", Target: "textarea#description", Text: "mcp-hub 接入自动发布", Scope: "apply"},
+				// 「保存」用按文本匹配的 click:menuCandidateSelector 里 div 排在 button
+				// 之前,ElementR 会命中 div.sectionBottom(968px 宽的按钮容器),点它不
+				// 触发内层 button 的 React 事件 ⇒ 三次真机点击全部静默无效。现在由
+				// pickByText 的打分优先选 BUTTON(见 browser.go clickability)。
 				{Kind: "click", Target: menuCandidateSelector, Match: `^\s*保存\s*$`, Scope: "apply"},
+				// 保存后必须看到列表里出现待发布/开发中版本,才算真落库。
+				// 这一条是 11-12 的教训:前几轮「保存」静默无效却仍返回 applied_unverified,
+				// 用户看到「已保存未发布」而实际什么都没生成。宁可在这里 selector_miss,
+				// 也不要再给出与事实不符的成功表述。
+				{Kind: "waitVisible", Target: "body", Match: `开发中|待发布|未发布`, Scope: "apply"},
 			}},
 			Done: func(text string) bool {
 				// 已存在待发布/未发布/草稿/编辑中/审批中的版本时才算达成,避免重复创建。
 				// 只依赖「已上线」状态做幂等会让 1.0.0 一旦上线、publish 永远跳过、
 				// 永远创建不出新版本(钉钉允许多版本,创建是增量动作,不是重复操作)。
-				// 2026-11-11 20:40 真机:1.0.0 已上线时此处返回 false → 执行 apply 创建 1.0.1 草稿。
-				re := regexp.MustCompile(`待发布|未发布|草稿|编辑中|审批中|待审核|未上线`)
+				// 2026-11-12 真机:列表出现「1.0.1 开发中」⇒ 这里返回 true,不再重复创建。
+				re := regexp.MustCompile(`开发中|待发布|未发布|草稿|编辑中|审批中|待审核|未上线`)
 				return re.MatchString(text)
 			},
 			// 2026-11-11 19:38 端到端真机实测:旧版 Done 检测「版本状态+已上线」,
 			// 1.0.0 已上线时判 already_done、apply 不执行、不会生成 1.0.1;当时把清单
 			// 改为写明「跳过」。但创建新版本是钉钉支持的增量动作(应用可有多版本),
-			// 幂等跳过反而让发布按钮永远拿不到。20:40 用户明确授权生成 1.0.1 草稿后,
-			// 改为按「有待发布版本」做幂等:无待发布版本时执行 apply 创建并保存,
-			// 已存在待发布版本则 already_done 跳过。
+			// 幂等跳过反而让发布永远走不下去。20:40 起改为按「有待发布版本」做幂等:
+			// 无待发布版本时执行 apply 创建并保存,已存在待发布版本则 already_done 跳过。
+			// 2026-11-12 真机已跑通并被这条幂等覆盖:第二次执行时列表已有「1.0.1 开发中」,
+			// publish 正确判 already_done、不重复创建第二个草稿。
 			PlanLine:     "创建新版本并保存(版本号沿用后台默认值如 1.0.1;会在企业内产生版本草稿记录;已存在待发布版本则跳过)",
-			ApplyWarning: "「保存」后只生成待发布版本;20:40 与 11-12 两次真机「保存」均未生成 1.0.1 草稿:前者因版本号未填、后者因版本描述(必填)的键盘事件 fill 静默落空,均已修复(fill 1.0.1 + fill 读回校验/JS setter 降级)但尚未复跑验证;发布按钮未真机校准(采集它等于真发布),不自动点击。请在后台核对版本列表与内容后再手动发布",
+			ApplyWarning: "只在企业内生成「开发中」版本草稿,不自动点「发布」——发布是不可逆动作,请人工在后台核对内容后点发布。2026-11-12 真机已验证「保存」真实落库(版本列表出现 1.0.1 开发中),历史三次失败的两个根因均已修复:版本号/描述未真正填入,以及「保存」点击命中外层 div 容器导致 React 事件不触发",
 		},
 	}
 }

@@ -475,6 +475,78 @@ func (bx *BrowserExecutor) clickInRow(op Op) error {
 }
 
 // pick 按选择器取第 Index 个匹配元素(多匹配时跳过前面 N 个)。
+// pickByText 在 op.Target 里按可见文本正则找元素,并优先返回「真正可点击的实体」。
+//
+// 为什么不能直接用 ElementR:ElementR 返回文档顺序的第一个匹配元素,而
+// menuCandidateSelector 里 div 排在 button 之前。以钉钉「保存」为例,页面上有
+// div.sectionBottom(宽 968px 的按钮容器)、内层 button.dtd-btn-primary 和
+// 内层 span 三个元素的文本都是「保存」,ElementR 选中的是那个 div —— 点它的
+// 中心/左边缘不会触发 button 上的 React 事件,点击静默无效。2026-11-12 三次
+// 真机「保存」全部失败、草稿始终不生成,根因就是这个(与 fill 无关;
+// rowActionSelector 的注释里记过同类坑,当时只修了 clickInRow)。
+//
+// 策略:先用 JS 在候选集合里按文本+可点击性打分,取出最优元素在列表中的
+// 下标,再按同一选择器取回 Element;取不到时退回 ElementR 保持旧行为。
+func (bx *BrowserExecutor) pickByText(target, match string) (*rod.Element, error) {
+	re, err := regexp.Compile(match)
+	if err != nil {
+		return bx.page.Timeout(browserOpTimeout).ElementR(target, match)
+	}
+	els, err := bx.page.Timeout(browserOpTimeout).Elements(target)
+	if err != nil || len(els) == 0 {
+		return bx.page.Timeout(browserOpTimeout).ElementR(target, match)
+	}
+
+	best, bestScore := -1, -1
+	for i, el := range els {
+		text, err := el.Timeout(browserOpTimeout).Text()
+		if err != nil || !re.MatchString(strings.TrimSpace(text)) {
+			continue
+		}
+		score := clickability(el)
+		if score > bestScore {
+			best, bestScore = i, score
+		}
+	}
+	if best < 0 {
+		// 文本匹配口径与 ElementR 不完全一致(如含嵌套文本)时退回旧实现
+		return bx.page.Timeout(browserOpTimeout).ElementR(target, match)
+	}
+	return els[best], nil
+}
+
+// clickability 给候选元素的可点击性打分:越高越优先。
+// 真正的交互实体(button/[role=button]/a)加分,纯容器(div/li 等)减分;
+// 不可见或零尺寸的元素直接判负,避免点到隐藏节点。
+func clickability(el *rod.Element) int {
+	res, err := el.Eval(`() => {
+		const el = this;
+		const r = el.getBoundingClientRect();
+		const cs = getComputedStyle(el);
+		const tag = el.tagName;
+		let score = 0;
+		if (tag === 'BUTTON' || tag === 'A') score += 40;
+		if (el.getAttribute('role') === 'button' || el.getAttribute('role') === 'menuitem') score += 35;
+		if (tag === 'SPAN') score += 20;
+		if (tag === 'LI') score += 5;
+		if (tag === 'DIV') score -= 30;
+		// 容器越宽越可能是包裹层:真正的按钮通常尺寸贴近文字
+		if (r.width > 300) score -= 25;
+		if (r.height > 60) score -= 15;
+		if (cs.visibility !== 'visible' || cs.display === 'none' || cs.opacity === '0') score -= 200;
+		if (r.width === 0 || r.height === 0) score -= 200;
+		if (el.disabled === true || el.getAttribute('aria-disabled') === 'true') score -= 150;
+		// 内层元素(其子节点里还有同名可点实体)通常是文本节点,轻微加分
+		if (el.querySelector('button, [role=button], a')) score -= 10;
+		return score;
+	}`)
+	if err != nil {
+		return 0
+	}
+	n := res.Value.Num()
+	return int(n)
+}
+
 // op.Match 非空时改用「按可见文本匹配」:飞书开放平台等 React SPA 的 class 随
 // 改版变化,按钮文本比 class 稳定得多;此时 Target 仍可写逗号分隔的多候选。
 func (bx *BrowserExecutor) pick(op Op) (*rod.Element, error) {
@@ -488,7 +560,7 @@ func (bx *BrowserExecutor) pick(op Op) (*rod.Element, error) {
 		if op.Index != 0 {
 			return nil, fmt.Errorf("Match 与 Index 不能同时使用(Index=%d)", op.Index)
 		}
-		el, err := bx.page.Timeout(browserOpTimeout).ElementR(op.Target, op.Match)
+		el, err := bx.pickByText(op.Target, op.Match)
 		if err != nil {
 			return nil, fmt.Errorf("按文本 /%s/ 在 %q 中未匹配到元素: %w", op.Match, op.Target, err)
 		}
