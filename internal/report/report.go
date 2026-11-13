@@ -318,6 +318,9 @@ type MCPDownstream struct {
 	TableID  string
 	// CreatedField 创建时间字段名(配合 automatic_fields)。
 	CreatedField string
+	// BotName 定时推送身份。多机器人企微必须在配置中明确指定,
+	// 因为定时任务无法临时向用户追问。
+	BotName string
 }
 
 // FetchRecords 分页拉取 Bitable 全部记录(automatic_fields 带出创建时间)。
@@ -407,7 +410,7 @@ func (d *MCPDownstream) UpdateDoc(ctx context.Context, fileID, markdown string) 
 
 // Push 复用统一语义层 im.send_text。
 func (d *MCPDownstream) Push(ctx context.Context, platform, chatID, text string) error {
-	_, err := semantic.SendText(ctx, d.Reg, d.Mgr, platform, chatID, text)
+	_, err := semantic.SendTextWithBot(ctx, d.Reg, d.Mgr, platform, d.BotName, chatID, text)
 	return err
 }
 

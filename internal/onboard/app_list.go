@@ -3,6 +3,7 @@ package onboard
 import (
 	"encoding/json"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,39 @@ func appListBase(p *Portal) string {
 	return u.Scheme + "://" + u.Host + u.Path
 }
 
+// appListHashPrefix 返回列表页 URL 的 hash 路径特征(去掉 query,带前导 #)。
+//
+// 2026-11-12 真机创建 mcp-hub 时定位:企微后台首页
+//
+//	https://work.weixin.qq.com/wework_admin/frame#/index
+//
+// 与机器人列表页
+//
+//	https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage
+//
+// 共用 host+path(/wework_admin/frame),appListBase 前缀分不开。旧逻辑把首页
+// 也判成「应用列表页」,pickPlatformPage 按 MustPages 顺序抢先绑到首页,
+// create-bot 第 1 步在首页等「创建机器人」按钮必然 selector_miss。
+// 声明了 AppListURL 的平台(钉钉/企微)必须再比对 hash 路径;没有声明的
+// (飞书)返回空串,保持原有行为,不影响已真机验证的链路。
+func appListHashPrefix(p *Portal) string {
+	if p == nil || p.AppListURL == "" {
+		return ""
+	}
+	u, err := url.Parse(p.AppListURL)
+	if err != nil {
+		return ""
+	}
+	frag := u.Fragment
+	if i := strings.IndexByte(frag, '?'); i >= 0 {
+		frag = frag[:i]
+	}
+	if frag == "" {
+		return ""
+	}
+	return "#" + frag
+}
+
 // isAppListPage 判断标签是否停在该平台的应用列表页。
 // 用 host+path 前缀而非整串相等:SPA 会在同一页面里改 hash/query(分组筛选),
 // 整串相等会把「已在列表页」误判成「不在」,从而每次 start 都堆一个新标签。
@@ -47,10 +81,46 @@ func isAppListPage(p *Portal, raw string) bool {
 	if base == "" || !strings.HasPrefix(raw, base) || !portalPageBelongs(p, raw) {
 		return false
 	}
+	// hash 路径再收紧一层:同 host+path 的后台首页(#/index)、详情页
+	// (#/aiHelper/detail)都不是列表页,不能让它们抢占执行器绑定。
+	if want := appListHashPrefix(p); want != "" {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return false
+		}
+		frag := u.Fragment
+		if i := strings.IndexByte(frag, '?'); i >= 0 {
+			frag = frag[:i]
+		}
+		if "#"+frag != want {
+			return false
+		}
+	}
 	// 企微的列表页与详情页共用 host+path 前缀(/wework_admin/frame),靠 hash 区分;
 	// 详情页(#/aiHelper/detail?aibotid=)命中 portalDetailMatch 时必须排除,
 	// 否则详情页会被当成列表页,pickPlatformPage 的「详情优先」被短路。
 	return !portalDetailMatch(p, raw)
+}
+
+// pageInAdminArea 判断标签是否停在该平台的管理区域(host+path 前缀)。
+//
+// 2026-11-12 真机:企微官网营销页 https://work.weixin.qq.com/#/app/workbenchEditor/index
+// 与管理后台 https://work.weixin.qq.com/wework_admin/frame 是**同一个 host**,
+// portalPageBelongs 无法区分。作为纵深防御,跳过这类非管理区域标签,不让它的
+// 链接参与 listExistingApps 的 a[href] 扫描。(本次「机器人删除却未触发代建」
+// 的主因是后台首页链接被 appIDFromURL 宽匹配,修复在 create_app.go 的
+// AppIDRe 窄匹配处,本函数只负责把明显不属于管理区域的标签挡在外面。)
+// 声明了 AppListURL 的平台(钉钉/企微)用其 host+path 卡住;未声明的(飞书)
+// 返回 true,保持原有的全域扫描行为,不影响已验证链路。
+func pageInAdminArea(p *Portal, raw string) bool {
+	if p == nil || !portalPageBelongs(p, raw) {
+		return false
+	}
+	base := appListBase(p)
+	if base == "" {
+		return true
+	}
+	return strings.HasPrefix(raw, base)
 }
 
 // findAppListTab 只读扫描 /json/list,命中即激活到前台。
@@ -176,9 +246,9 @@ func (bx *BrowserExecutor) focusAppListPage(p *Portal) bool {
 	return found
 }
 
-// clickAppRow 点击列表页第一个已有应用,进入其详情页。
+// clickAppRow 点击指定名称的应用行;非空时按可见文本精确匹配。
 // 纯导航点击,不填表、不提交、不创建;失败返回 false,由调用方降级。
-func clickAppRow(p *Portal) (string, bool) {
+func clickAppRow(p *Portal, appName string) (string, bool) {
 	if p == nil || p.AppListRowSelector == "" {
 		return "", false
 	}
@@ -190,9 +260,13 @@ func clickAppRow(p *Portal) (string, bool) {
 	if !bx.focusAppListPage(p) {
 		return "", false
 	}
+	op := Op{Kind: "click", Target: p.AppListRowSelector}
+	if strings.TrimSpace(appName) != "" {
+		op.Match = `^\s*` + regexp.QuoteMeta(strings.TrimSpace(appName)) + `\s*$`
+	}
 	if err := bx.RunAction(&BrowserAction{
 		Script: "app-list@2026-11-click-row",
-		Ops:    []Op{{Kind: "click", Target: p.AppListRowSelector}},
+		Ops:    []Op{op},
 	}, nil); err != nil {
 		return "", false
 	}
@@ -201,7 +275,14 @@ func clickAppRow(p *Portal) (string, bool) {
 	for time.Now().Before(deadline) {
 		if pages, e := debugPages(); e == nil {
 			for _, raw := range pages {
-				if portalDetailMatch(p, raw) {
+				if !portalDetailMatch(p, raw) {
+					continue
+				}
+				if p.Name != "wecom" {
+					return raw, true
+				}
+				// 残留的其他机器人详情页不能冒充本次点击结果。
+				if page := findWeComDetailPage(bx, raw); page != nil && weComDetailBotName(page) == strings.TrimSpace(appName) {
 					return raw, true
 				}
 			}

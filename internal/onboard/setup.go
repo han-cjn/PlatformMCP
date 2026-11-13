@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/go-rod/rod"
 )
 
 // defaultPerms 是 Hub 能力矩阵所需的最小权限集(见 README 的 enable-perms 说明)。
@@ -32,6 +34,8 @@ type SetupResult struct {
 	Platform   string           `json:"platform"`
 	Phase      string           `json:"phase"` // need_confirmation / done / partial / browser_missing / waiting_login / unsupported
 	AppURL     string           `json:"app_url,omitempty"`
+	BotName    string           `json:"bot_name,omitempty"`
+	Bots       []string         `json:"bots,omitempty"`
 	Plan       []string         `json:"plan"`
 	Steps      []SetupStep      `json:"steps"`
 	Candidates []string         `json:"candidates,omitempty"`
@@ -91,8 +95,19 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 
 	// 阶段 1:自动点进应用。优先用已打开的详情页,否则从列表页读出应用链接直接打开,
 	// 全程不依赖易变的 DOM 卡片选择器,也不需要用户点击。
-	appURL, st := openAppForSetup(p, w)
+	appURL, st := openAppForSetup(p, w, appName)
 	res.Steps = append(res.Steps, st)
+	if platform == "wecom" && optionalAppName([]string{appName}) != "" {
+		res.BotName = optionalAppName([]string{appName})
+	}
+	if st.Status == "need_bot_selection" || st.Status == "app_not_found" || st.Status == "bot_identity_mismatch" {
+		res.Phase = st.Status
+		res.Next = st.Message
+		if platform == "wecom" {
+			res.Bots = listWeComBotNames(p)
+		}
+		return res, nil
+	}
 	res.AppURL = appURL
 	if st.Status == "browser_missing" || st.Status == "selector_miss" {
 		res.Phase = "partial"
@@ -139,11 +154,13 @@ func Setup(platform, appName string, confirmed bool, reload func(map[string]stri
 
 	// 阶段 3:抓凭据 → 校验 → 写 .env → 热重载(create_app 已做过就跳过)。
 	if res.Capture == nil {
-		cap, err := Capture(platform, reload)
+		// 已选中的机器人名必须贯穿接入收尾,否则又回到未消歧的旧 Capture。
+		cap, err := CaptureNamed(platform, optionalAppName([]string{appName}), reload)
 		if err != nil {
 			return nil, err
 		}
 		res.Capture = cap
+		res.BotName = cap.BotName
 		res.Steps = append(res.Steps, SetupStep{ID: "capture", Status: cap.Phase, Message: cap.Next})
 	}
 
@@ -243,7 +260,7 @@ func setupPlan(p *Portal, appName string, needCreate bool) []string {
 }
 
 // openAppForSetup 只读地定位应用详情页;列表为空时返回 need_create_app 交给上层代建。
-func openAppForSetup(p *Portal, w *WatchResult) (string, SetupStep) {
+func openAppForSetup(p *Portal, w *WatchResult, appName ...string) (string, SetupStep) {
 	// token_page 平台(腾讯文档)的授权页本身就是凭据页:直接确保它已打开,
 	// 不去列应用、不触发创建,也不需要用户点击任何按钮。
 	if p.Flow == "token_page" {
@@ -257,6 +274,9 @@ func openAppForSetup(p *Portal, w *WatchResult) (string, SetupStep) {
 		return p.URL, SetupStep{ID: "open_app", Status: "done"}
 	}
 	if w.InAppDetail && w.DetailURL != "" {
+		if p.Name == "wecom" {
+			return wecomOpenDetail(p, w.DetailURL, optionalAppName(appName))
+		}
 		return w.DetailURL, SetupStep{ID: "open_app", Status: "already_open"}
 	}
 	apps, listVerified, err := listExistingApps(p)
@@ -273,17 +293,47 @@ func openAppForSetup(p *Portal, w *WatchResult) (string, SetupStep) {
 		return "", SetupStep{ID: "open_app", Status: "page_loading",
 			Message: "已自动进入应用列表页,但页面尚未渲染完成(未在页面上读到列表特征);此时不能判断企业内是否已有应用"}
 	}
-	if apps[0].NeedsClick {
-		// 钉钉列表页的应用是 <tr data-row-key><h5 title="应用名">,没有 href。
-		// 点击行只是导航到详情页,不提交任何表单、不创建任何东西。
-		if detail, ok := clickAppRow(p); ok {
+	// 列表未确认渲染完成时,即便读到了条目也可能是脏数据(2026-11-12 真机:
+	// 企微官网营销页的「工作台管理」被当成已有机器人)。此时绝不能点进去,
+	// 否则确认清单会漏掉「创建应用」。飞书未声明 markers,不启用该门。
+	if !listVerified && len(p.AppListMarkers) > 0 {
+		return "", SetupStep{ID: "open_app", Status: "page_loading",
+			Message: "已自动进入应用列表页,但页面尚未确认渲染完成(未读全列表特征);此时读到的应用条目不可信,不能据此判断企业内是否已有应用"}
+	}
+	targetName := defaultAppName
+	if len(appName) > 0 && strings.TrimSpace(appName[0]) != "" {
+		targetName = strings.TrimSpace(appName[0])
+	}
+	selected := selectAppByName(apps, targetName)
+	if p.Name == "wecom" {
+		requested := optionalAppName(appName)
+		var names []string
+		var found bool
+		selected, names, found = resolveWeComApp(apps, requested)
+		if !found {
+			status := "need_bot_selection"
+			message := "检测到多个企业微信机器人,请询问用户使用哪个机器人,并带 app_name 重试;本次未打开或读取任何机器人凭据"
+			if requested != "" {
+				status = "app_not_found"
+				message = "未找到名称与 " + requested + " 完全匹配的企业微信机器人;请从现有机器人中明确选择,本次未自动改选"
+			}
+			if len(names) == 0 && requested != "" {
+				message = "未能从已有详情页确认机器人 " + requested + " 的身份;请从列表中明确选择,本次未读取任何机器人凭据"
+			}
+			return "", SetupStep{ID: "open_app", Status: status, Message: message + ";候选: " + strings.Join(names, "、")}
+		}
+		targetName = selected.Name
+	}
+	if selected.NeedsClick {
+		// 点击已明确选择的应用行只是导航,不提交任何表单、不创建任何东西。
+		if detail, ok := clickAppRow(p, targetName); ok {
 			return detail, SetupStep{ID: "open_app", Status: "done",
-				Message: "已自动进入应用列表页,并点击进入已有应用「" + apps[0].Name + "」的详情页(未新建应用)"}
+				Message: "已自动进入应用列表页,并点击进入已有应用「" + selected.Name + "」的详情页(未新建应用)"}
 		}
 		return "", SetupStep{ID: "open_app", Status: "selector_miss",
-			Message: "已自动进入应用列表页并检测到已有应用「" + apps[0].Name + "」,但点击进入详情失败(行选择器未命中);请在浏览器点进该应用后重试,不要创建重复应用"}
+			Message: "已自动进入应用列表页并检测到已有应用「" + selected.Name + "」,但点击进入详情失败(行选择器未命中);请在浏览器点进该应用后重试,不要创建重复应用"}
 	}
-	target := absoluteAppURL(p, apps[0].URL)
+	target := absoluteAppURL(p, selected.URL)
 	if !openDebugTab(target) {
 		return "", SetupStep{ID: "open_app", Status: "selector_miss", Message: "CDP 未能打开应用详情页 " + target}
 	}
@@ -296,6 +346,97 @@ func openAppForSetup(p *Portal, w *WatchResult) (string, SetupStep) {
 		time.Sleep(300 * time.Millisecond)
 	}
 	return target, SetupStep{ID: "open_app", Status: "done", Message: "已发起打开,页面仍在加载"}
+}
+
+// optionalAppName 区分「用户未选」与默认值。默认值只能用于创建,不能用于在多个
+// 已有机器人中自动选择。
+func optionalAppName(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(names[0])
+}
+
+// listWeComBotNames 只读返回候选,失败时返回空清单,不把失败伪装成没有机器人。
+func listWeComBotNames(p *Portal) []string {
+	apps, _, err := listExistingApps(p)
+	if err != nil {
+		return nil
+	}
+	_, names, _ := resolveWeComApp(apps, "")
+	return names
+}
+
+// wecomOpenDetail 详情页也需要身份门:SPA 停在「测试」时,不能因为 URL 有
+// aibotid 就把它的凭据写入另一个机器人配置。
+func wecomOpenDetail(p *Portal, detailURL, requested string) (string, SetupStep) {
+	bx, err := NewBrowserExecutorForPlatform("", p)
+	if err != nil {
+		return "", SetupStep{ID: "open_app", Status: "browser_missing", Message: err.Error()}
+	}
+	defer bx.Close()
+	name := ""
+	if page := findWeComDetailPage(bx, detailURL); page != nil {
+		name = weComDetailBotName(page)
+	}
+	if name == "" {
+		return "", SetupStep{ID: "open_app", Status: "bot_identity_mismatch",
+			Message: "当前企微详情页未能确认机器人名称;请从列表明确选择机器人,本次未读取凭据"}
+	}
+	if requested != "" && !strings.EqualFold(name, requested) {
+		return "", SetupStep{ID: "open_app", Status: "bot_identity_mismatch",
+			Message: "当前详情页是机器人「" + name + "」,不是指定的「" + requested + "」;请从列表明确选择,本次未读取凭据"}
+	}
+	if requested == "" {
+		// 此函数没有 WatchResult,先只读检查登录态;已过期时不要再打开列表页。
+		// 企微过期跳转与自动导航会互相抢焦点并重复开登录标签。保守停在选择门。
+		if current, watchErr := Watch("wecom"); watchErr == nil {
+			for _, pageURL := range current.Pages {
+				if portalIsLoginPage(p, pageURL) && portalPageBelongs(p, pageURL) {
+					return "", SetupStep{ID: "open_app", Status: "need_bot_selection",
+						Message: "企微列表登录态已过期;请完成扫码登录后重新调用并从列表明确选择机器人,本次未读取凭据"}
+				}
+			}
+		}
+		apps, verified, e := listExistingApps(p)
+		if e != nil || !verified {
+			// 详情页仍在而列表登录态过期时,不能拿残留页面证明「只有一个机器人」。
+			// 宁可要求明确选择,也不能在未核对完整列表时读取/覆盖凭据。
+			return "", SetupStep{ID: "open_app", Status: "need_bot_selection",
+				Message: "当前详情页为「" + name + "」,但完整机器人列表暂不可确认(可能登录态过期);请从列表明确选择并带 app_name 重试,本次未读取凭据"}
+		}
+		_, _, found := resolveWeComApp(apps, name)
+		if len(apps) > 1 && found {
+			return "", SetupStep{ID: "open_app", Status: "need_bot_selection",
+				Message: "检测到多个企业微信机器人,当前详情页为「" + name + "」;请询问用户并带 app_name 重试,本次未读取凭据"}
+		}
+	}
+	return detailURL, SetupStep{ID: "open_app", Status: "already_open",
+		Message: "已确认当前详情页机器人身份为「" + name + "」"}
+}
+
+func weComDetailBotName(page *rod.Page) string {
+	if page == nil {
+		return ""
+	}
+	result, err := page.Timeout(browserOpTimeout).Eval(`() => document.querySelector('span.name')?.textContent?.trim() || ''`)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(result.Value.Str())
+}
+
+func findWeComDetailPage(bx *BrowserExecutor, detailURL string) *rod.Page {
+	var found *rod.Page
+	_ = bx.safe(func() {
+		for _, page := range bx.browser.MustPages() {
+			if info, err := page.Info(); err == nil && info != nil && info.URL == detailURL {
+				found = page
+				return
+			}
+		}
+	})
+	return found
 }
 
 // absoluteAppURL 列表页的 href 常是相对路径,补成可直接打开的绝对 URL。

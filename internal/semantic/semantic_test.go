@@ -107,13 +107,13 @@ func TestSendTextDingTalkMapping(t *testing.T) {
 func TestSendTextWeComMapping(t *testing.T) {
 	f := &fakeCaller{}
 	if _, err := Invoke(context.Background(), BuiltinCatalog(), f, "im.send_text", "wecom",
-		map[string]any{"target": "chat1", "text": "hi"}, nil); err != nil {
+		map[string]any{"target": "chat1", "text": "hi", "bot_name": "mcp-hub"}, nil); err != nil {
 		t.Fatalf("调用失败: %v", err)
 	}
 	if f.tool != "wecom_send_text" {
 		t.Fatalf("下游工具不符: %s", f.tool)
 	}
-	if f.args["chatid"] != "chat1" || f.args["content"] != "hi" {
+	if f.args["chatid"] != "chat1" || f.args["content"] != "hi" || f.args["bot_name"] != "mcp-hub" {
 		t.Fatalf("企微参数不符: %v", f.args)
 	}
 }

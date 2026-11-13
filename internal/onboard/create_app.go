@@ -19,8 +19,11 @@ import (
 // 多候选。飞书开放平台是 React SPA,class 随改版变化,不绑定单一选择器。
 
 const (
-	defaultAppName      = "mcp-hub"
-	createAppURLWaitMax = 15 * time.Second
+	defaultAppName = "mcp-hub"
+	// 2026-11-12 真机:企微 API 模式点「保存」后创建请求较慢,详情页跳转
+	// 可能超过 15s。旧上限会误报 create_failed,而 Next 又让用户「手动完成
+	// 创建」——实际已创建,极可能诱导重复提交不可撤销的创建表单。
+	createAppURLWaitMax = 30 * time.Second
 	createAppPollStep   = 500 * time.Millisecond
 )
 
@@ -100,8 +103,10 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 		res.Phase = "page_loading"
 		res.Next = "页面尚未稳定;继续轮询 hub.onboard.watch,状态明确后重试 hub.onboard.create_app"
 		return res, nil
-	case w.InAppDetail:
-		// 幂等门 1:用户已经停在某个应用的详情页了,再建一个纯属浪费。
+	case w.InAppDetail && platform != "wecom":
+		// 企微可能同时存在多个详情页,不能凭当前页就认定是目标机器人;
+		// 统一走下面的列表名称匹配与多机器人消歧。
+		// 幂等门 1:其他平台沿用已打开详情页,避免重复创建。
 		// 直接帮他收尾,这正是「人已登录并点进凭证页」场景下最该做的事。
 		res.Phase = "already_in_detail"
 		res.ExistingApps = []AppRef{{AppID: portalAppID(p, w.DetailURL), URL: w.DetailURL}}
@@ -115,19 +120,45 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 	}
 
 	// 幂等门 2:列表页已经有应用卡片 → 复用,不新建。
-	apps, _, err := listExistingApps(p)
+	// listVerified 为 false 时,「读到的条目」和「空列表」都不可信:既不能据此
+	// 复用,也不能据此创建不可撤销的新应用(与 setup.go openAppForSetup 的
+	// 硬闸门对齐)。只对声明了 AppListMarkers 的平台(钉钉/企微)启用该门;
+	// 未声明的平台(飞书)保持原有行为,不波及已真机验证的链路。
+	apps, listVerified, err := listExistingApps(p)
 	if err != nil {
 		res.Phase = "browser_missing"
 		res.Message = err.Error()
 		res.Next = "读取应用列表失败;确认调试 Chrome 仍在运行后重试"
 		return res, nil
 	}
-	if len(apps) > 0 {
+	strictListGate := len(p.AppListMarkers) > 0
+	if len(apps) > 0 && (listVerified || !strictListGate) {
 		res.Phase = "existing_apps"
 		res.ExistingApps = apps
+		if platform == "wecom" {
+			requested := appName
+			if appName == defaultAppName {
+				// 区分「默认值」与「用户真的点名 mcp-hub」:只有多机器人存在时
+				// 才要求重新明确选择;单机器人继续兼容旧默认名。
+				requested = ""
+			}
+			selected, _, found := resolveWeComApp(apps, requested)
+			if !found {
+				res.Phase = "need_bot_selection"
+				res.Next = "检测到多个企业微信机器人或未找到指定名称;请询问用户明确选择 app_name 后重试;本次未打开或读取任何机器人凭据"
+				return res, nil
+			}
+			res.AppName = selected.Name
+		}
 		res.Next = "检测到已有应用,为避免在企业里重复创建不新建;" +
 			"调用 hub.onboard.setup 会自动打开该应用详情页并完成抓凭据与后续配置(无需用户点击、无需登录、无需终端命令);" +
 			"只需抓凭据时才让用户点进「凭证与基础信息」页再调 hub.onboard.capture"
+		return res, nil
+	}
+	if strictListGate && !listVerified {
+		res.Phase = "page_loading"
+		res.Next = "应用列表页尚未确认渲染完成(未读全列表特征),此时读到的应用条目与空列表都不可信;" +
+			"为避免重复创建不可撤销的应用本次不新建。请重跑 hub.onboard.start 让列表页渲染完成后再调 hub.onboard.create_app,不要重复提交创建表单"
 		return res, nil
 	}
 
@@ -136,7 +167,7 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 		res.Phase = "need_confirmation"
 		res.Next = "创建应用会在企业里真实产生一个应用且不可撤销;当前页面未检测到已有应用链接(可能停在入口页),请先确认企业内没有可复用的应用。" +
 			"请用选择框让用户确认应用名(默认 \"" + appName + "\"),确认后带 confirmed=true 重新调用 hub.onboard.create_app。" +
-			"图标沿用平台默认;权限开通与版本发布由 hub.onboard.setup 继续自动完成"
+			"图标沿用平台默认;后续阶段由 hub.onboard.setup 按各平台声明继续自动完成(部分平台无版本/发布概念)"
 		return res, nil
 	}
 
@@ -169,31 +200,53 @@ func CreateApp(platform, appName string, confirmed bool, reload func(map[string]
 
 	// 提交后必须验证真的产生了新应用详情页,不能只凭「点到了按钮」就算成功。
 	created := waitForNewDetail(p, before)
+	listed := false
+	if created == "" {
+		// 企微 API 模式真机:保存成功后也可能不跳详情页,只在列表页新增一行。
+		// 先只读确认「应用确实已创建」,再走既有 openAppForSetup 链路进详情,
+		// 绝不因为没等到 URL 变化就报「创建失败」诱导重复提交。
+		if listed = createdAppInList(p, appName); listed {
+			if w2, e := Watch(platform); e == nil {
+				// 刚创建的机器人已由用户明确命名,只跟随这个新详情 URL;不让
+				// 列表中其他机器人抢占,也不把创建流程变成自由选择流程。
+				if detail, step := openAppForSetup(p, w2, appName); detail != "" && step.Status != "need_create_app" {
+					created = detail
+					res.Message = "保存后未立即跳转详情页;已在列表页确认新应用「" + appName +
+						"」存在并自动进入其详情页(未重复创建)"
+				}
+			}
+		}
+	}
 	if created == "" {
 		res.Phase = "create_failed"
-		res.Message = "提交后 " + createAppURLWaitMax.String() + " 内未出现新的应用详情页"
 		res.Candidates = collectCandidates(bx)
-		res.Next = "可能触发了平台风控/二次确认,或表单未通过校验;请让用户在浏览器里核对并手动完成创建," +
-			"然后调用 hub.onboard.set_credentials 收尾(或 hub.onboard.capture 自动抓取)。不要重复提交创建表单"
+		if listed {
+			res.Message = "新应用「" + appName + "」已在列表中出现,但未能自动进入详情页"
+			res.Next = "应用已创建,**不要重复提交创建表单**;请在浏览器里点进该应用详情页后调用 hub.onboard.capture 抓凭据"
+		} else {
+			res.Message = "提交后 " + createAppURLWaitMax.String() + " 内未出现新的应用详情页,列表页也未检测到新应用"
+			res.Next = "可能触发了平台风控/二次确认,或表单未通过校验;请让用户在浏览器里核对并手动完成创建," +
+				"然后调用 hub.onboard.set_credentials 收尾(或 hub.onboard.capture 自动抓取)。不要重复提交创建表单"
+		}
 		return res, nil
 	}
 	res.CreatedURL = created
 	res.ExistingApps = []AppRef{{AppID: portalAppID(p, created), URL: created}}
 
-	// 新应用已落到详情页,直接走既有收尾链路:抓凭据 → 校验 → 写 .env → 热重载。
-	res.Capture, err = Capture(platform, reload)
+	// 新应用已落到详情页,抓凭据 → 校验 → 写配置 → 热重载。
+	res.Capture, err = CaptureNamed(platform, appName, reload)
 	if err != nil {
 		return nil, err
 	}
 	if res.Capture.Phase != "done" {
 		res.Phase = "create_failed"
 		res.Message = "应用已创建,但自动收尾未完成(capture.phase=" + res.Capture.Phase + ")"
-		res.Next = "按 capture.next 继续;权限开通与版本发布可调用 hub.onboard.setup 自动完成,无需用户手动操作"
+		res.Next = "按 capture.next 继续;后续阶段可调用 hub.onboard.setup 按平台声明处理,无需用户手动操作(部分平台无版本/发布概念)"
 		return res, nil
 	}
 	res.Phase = "done"
 	res.Next = "应用已创建且凭据已写入 .env 并完成热重载;请调 hub.health 确认 credentials=true / mounted=true," +
-		"权限开通与版本发布可继续调用 hub.onboard.setup 自动完成"
+		"后续阶段可调用 hub.onboard.setup 按平台声明处理(企微智能机器人无版本/发布概念)"
 	return res, nil
 }
 
@@ -219,12 +272,38 @@ func createAppOps(act *BrowserAction, appName string) []Op {
 		if op.Kind == "waitURL" || op.Kind == "screenshot" {
 			continue
 		}
-		if op.Kind == "fill" {
+		// fillJS 与 fill 都支持 $app_name 占位符(2026-11-12 企微创建页校准:
+		// hidden 标签上必须用纯 JS 填值,漏替换会带着字面量去提交表单)。
+		if op.Kind == "fill" || op.Kind == "fillJS" {
 			op.Text = strings.ReplaceAll(op.Text, "$app_name", appName)
 		}
 		ops = append(ops, op)
 	}
 	return ops
+}
+
+// markersRendered 判断列表页文本是否命中整组渲染特征。
+//
+// 必须整组命中:首页左侧菜单也含「智能机器人」「Intelligent robot」,单个词
+// 命中会把「停在首页」误判成「列表页已渲染」,进而误创建不可撤销的应用。
+// 2026-11-12 真机:企微后台会按标签语言渲染中文或英文 UI(CDP /json/new
+// 打开的列表页是英文),Portal 因此可声明一组备用语言 markers,两组任一组
+// 全中即视为已渲染;两组都空/都不中时返回 false,由调用方走 page_loading 门。
+func markersRendered(markers []string, text string) bool {
+	if len(markers) == 0 {
+		return false
+	}
+	// SPA 每个菜单项独占一行,innerText 里的换行会把「Intelligent Bot Create」
+	// 拆成「Intelligent Bot\nCreate」;2026-11-12 真机因此出现「压缩空白后
+	// 看起来全中、实际 strings.Contains 全不中」。两侧都归一化再比较。
+	normalized := strings.Join(strings.Fields(text), " ")
+	for _, marker := range markers {
+		want := strings.Join(strings.Fields(marker), " ")
+		if want == "" || !strings.Contains(normalized, want) {
+			return false
+		}
+	}
+	return true
 }
 
 // listExistingApps 只读地收集已存在的应用,用于幂等判断。
@@ -271,6 +350,23 @@ func listExistingApps(p *Portal) (apps []AppRef, listVerified bool, err error) {
 			if portalDetailMatch(p, info.URL) {
 				add(info.URL, "")
 			}
+			// 企微详情页先按页面名称去重;它与列表行指向同一机器人时只保留一条,
+			// 避免重复条目把「单机器人」误判成「多机器人」。
+			if portalDetailMatch(p, info.URL) && p.Name == "wecom" {
+				detailName := strings.TrimSpace(weComDetailBotName(pg))
+				duplicate := false
+				for i := range out {
+					if detailName != "" && strings.EqualFold(out[i].Name, detailName) {
+						out[i].URL = info.URL
+						out[i].NeedsClick = false
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					add(info.URL, detailName)
+				}
+			}
 			if hostOf(info.URL) != hostOf(p.URL) {
 				continue
 			}
@@ -284,11 +380,9 @@ func listExistingApps(p *Portal) (apps []AppRef, listVerified bool, err error) {
 					if el, e := pg.Timeout(browserOpTimeout).Element("body"); e == nil {
 						text, _ = el.Timeout(browserOpTimeout).Text()
 					}
-					rendered = len(p.AppListMarkers) > 0
-					for _, marker := range p.AppListMarkers {
-						if !strings.Contains(text, marker) {
-							rendered = false
-						}
+					rendered = markersRendered(p.AppListMarkers, text)
+					if !rendered && len(p.AppListMarkersAlt) > 0 {
+						rendered = markersRendered(p.AppListMarkersAlt, text)
 					}
 					if rendered {
 						break
@@ -298,6 +392,7 @@ func listExistingApps(p *Portal) (apps []AppRef, listVerified bool, err error) {
 				if rendered {
 					listVerified = true
 				}
+				// 企微列表可能比详情页先读到:按名称覆盖占位详情,消除重复候选。
 				if rendered && p.AppListRowSelector != "" {
 					els, e := pg.Elements(p.AppListRowSelector)
 					if e == nil {
@@ -310,7 +405,19 @@ func listExistingApps(p *Portal) (apps []AppRef, listVerified bool, err error) {
 								continue
 							}
 							key := "row:" + name
+							if p.Name == "wecom" {
+								key = "row:" + strings.ToLower(name)
+							}
 							if seen[key] {
+								if p.Name == "wecom" {
+									for i := range out {
+										if strings.EqualFold(out[i].Name, name) {
+											out[i].URL = info.URL
+											out[i].NeedsClick = true
+											break
+										}
+									}
+								}
 								continue
 							}
 							seen[key] = true
@@ -324,6 +431,11 @@ func listExistingApps(p *Portal) (apps []AppRef, listVerified bool, err error) {
 					}
 				}
 			}
+			// a[href] 兜底扫描只在本平台管理区域的标签上跑(纵深防御:官网营销页
+			// 与后台同 host,不能让它的链接参与判断)。
+			if !pageInAdminArea(p, info.URL) {
+				continue
+			}
 			els, e := pg.Elements("a[href]")
 			if e != nil {
 				continue
@@ -333,7 +445,9 @@ func listExistingApps(p *Portal) (apps []AppRef, listVerified bool, err error) {
 				if href == nil || *href == "" {
 					continue
 				}
-				if portalAppID(p, *href) == "" {
+				// 2026-11-12 真机根因见 appLinkIsPlatformApp 的注释:
+				// 「工作台管理」这类后台导航链接不能被当成已有机器人。
+				if !appLinkIsPlatformApp(p, *href) {
 					continue
 				}
 				add(*href, el.MustText())
@@ -344,6 +458,24 @@ func listExistingApps(p *Portal) (apps []AppRef, listVerified bool, err error) {
 		return nil, false, err
 	}
 	return out, listVerified, nil
+}
+
+// appLinkIsPlatformApp 判断 a[href] 是否指向该平台的真实应用/机器人。
+//
+// 2026-11-12 真机根因:企微后台首页的「工作台管理」链接是
+// `#/app/workbenchEditor/index`,不含 aibotid=,却会被 portalAppID 回落的
+// appIDFromURL 宽匹配抽出 workbenchEditor,当成已有机器人 → CreateApp 报
+// existing_apps、Setup 确认清单漏掉「创建应用」,机器人已删除却永远不触发代建。
+// 声明了 AppIDRe 的平台(钉钉/企微)只认该平台真实 ID 格式,不回落宽匹配;
+// 未声明的(飞书)保留 /app/<appId> 宽匹配,不影响已真机验证的链路。
+func appLinkIsPlatformApp(p *Portal, href string) bool {
+	if p == nil || href == "" {
+		return false
+	}
+	if p.AppIDRe != nil {
+		return p.AppIDRe.MatchString(href)
+	}
+	return portalAppID(p, href) != ""
 }
 
 // collectCandidates 失败时 dump 页面上可见的按钮文本与输入框 placeholder,
@@ -425,6 +557,59 @@ func pageSet() map[string]bool {
 		out[u] = true
 	}
 	return out
+}
+
+// appNameMatches 判断列表页读到的应用里是否有目标名称(去空白、忽略大小写)。
+func appNameMatches(apps []AppRef, appName string) bool {
+	want := strings.ToLower(strings.TrimSpace(appName))
+	if want == "" {
+		return false
+	}
+	for _, a := range apps {
+		if strings.ToLower(strings.TrimSpace(a.Name)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// selectAppByName 仅做名称精确匹配(去空白、忽略大小写)。
+// 找不到时返回零值;多机器人绝不能回退第一项。单一机器人且无指定名称时,
+// 由调用方显式处理旧版兼容,避免把回退藏进选择函数。
+func selectAppByName(apps []AppRef, name string) AppRef {
+	want := strings.ToLower(strings.TrimSpace(name))
+	for _, app := range apps {
+		if want != "" && strings.ToLower(strings.TrimSpace(app.Name)) == want {
+			return app
+		}
+	}
+	return AppRef{}
+}
+
+// resolveWeComApp 在导航前消歧。defaultName 仅用于列表为空时创建默认机器人,
+// 不得在多个已有机器人中自动选择。详情页优先时必须另行核对页面名称。
+func resolveWeComApp(apps []AppRef, requestedName string) (AppRef, []string, bool) {
+	names := make([]string, 0, len(apps))
+	for _, app := range apps {
+		if app.Name != "" {
+			names = append(names, app.Name)
+		}
+	}
+	if name := strings.TrimSpace(requestedName); name != "" {
+		selected := selectAppByName(apps, name)
+		return selected, names, selected.Name != ""
+	}
+	if len(apps) == 1 {
+		return apps[0], names, true
+	}
+	return AppRef{}, names, false
+}
+
+// createdAppInList 只读确认「应用是否已在列表页出现」:只有列表渲染校验通过
+// 才可信,避免把加载中/脏数据当成创建成功。
+func createdAppInList(p *Portal, appName string) bool {
+	apps, verified, err := listExistingApps(p)
+	return err == nil && verified && appNameMatches(apps, appName)
 }
 
 func waitForNewDetail(p *Portal, before map[string]bool) string {

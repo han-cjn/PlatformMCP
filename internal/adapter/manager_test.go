@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/example/mcp-hub/internal/config"
@@ -58,6 +59,25 @@ func TestBuildEnvPrefixPassthrough(t *testing.T) {
 	}
 	if got["OTHER_VAR=nope"] {
 		t.Error("未匹配前缀的变量不应透传")
+	}
+}
+
+func TestWeComMultiBotSendRequiresExplicitName(t *testing.T) {
+	cfg := &config.Config{WeCom: &config.WeComConfig{Bots: []config.WeComBotConfig{
+		{Name: "测试", BotID: "b1", Secret: "s1"},
+		{Name: "mcp-hub", BotID: "b2", Secret: "s2"},
+	}}}
+	m := &Manager{bots: map[string][]config.NamedBot{"wecom": cfg.WeComBots()}}
+	_, err := m.CallTool(t.Context(), "wecom", "wecom_send_text", map[string]any{"chatid": "chat1", "content": "hi", "bot_name": ""})
+	if err == nil || !strings.Contains(err.Error(), "need_bot_selection") ||
+		!strings.Contains(err.Error(), "测试") || !strings.Contains(err.Error(), "mcp-hub") {
+		t.Fatalf("多机器人缺少选择时必须拒绝并返回候选: %v", err)
+	}
+	_, err = m.CallTool(t.Context(), "wecom", "wecom_send_text", map[string]any{
+		"chatid": "chat1", "content": "hi", "bot_name": "不存在",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown_bot") {
+		t.Fatalf("未知机器人必须在连接下游前拒绝: %v", err)
 	}
 }
 

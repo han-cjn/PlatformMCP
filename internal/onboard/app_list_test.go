@@ -29,6 +29,15 @@ func TestIsAppListPage(t *testing.T) {
 		{"飞书标签不是钉钉列表页", ding, staleFeishuDetail, false},
 		{"钉钉列表页不是飞书列表页", Portals["feishu"], dingAppList, false},
 		{"未配置列表页的平台一律 false", Portals["wecom"], dingAppList, false},
+		// 2026-11-12 真机:企微后台首页与机器人列表页共用 host+path,只差 hash。
+		{"企微后台首页不是列表页", Portals["wecom"],
+			"https://work.weixin.qq.com/wework_admin/frame#/index", false},
+		{"企微机器人列表页", Portals["wecom"],
+			"https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage", true},
+		{"企微详情页不是列表页", Portals["wecom"],
+			"https://work.weixin.qq.com/wework_admin/frame#/aiHelper/detail?aibotid=123", false},
+		{"企微官网营销页不是列表页", Portals["wecom"],
+			"https://work.weixin.qq.com/#/app/workbenchEditor/index", false},
 		{"空 URL", ding, "", false},
 	}
 	for _, c := range cases {
@@ -209,6 +218,82 @@ func TestPickPlatformPagePrefersAppList(t *testing.T) {
 				t.Fatalf("pickPlatformPage=%d,期望 %d (urls=%v)", got, c.want, c.urls)
 			}
 		})
+	}
+}
+
+// TestWecomExecutorBindsToListTabNotAdminHome 锁死 2026-11-12 真机根因:
+// 后台首页(#/index)、机器人列表页(#/aiHelper/list)、官网营销页同域共存时,
+// 执行器必须绑到列表页,否则 create-bot 的「创建机器人」按钮永远等不到。
+func TestWecomExecutorBindsToListTabNotAdminHome(t *testing.T) {
+	p := Portals["wecom"]
+	const list = "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage"
+	urls := []string{
+		"https://work.weixin.qq.com/wework_admin/frame#/index",
+		list,
+		"https://work.weixin.qq.com/#/app/workbenchEditor/index",
+	}
+	if got := pickPlatformPage(p, urls); got != 1 {
+		t.Fatalf("执行器应绑到列表页(index 1),实际 %d (urls=%v)", got, urls)
+	}
+	if isAppListPage(p, urls[0]) {
+		t.Fatal("后台首页被误判成应用列表页,会再次导致 selector_miss")
+	}
+	if !isAppListPage(p, list) {
+		t.Fatal("真实机器人列表页被收紧逻辑误杀")
+	}
+}
+
+// TestAppListMarkersAcceptBothUILanguages 锁死 2026-11-12 真机:企微列表页
+// 会渲染成英文 UI,中文 markers 全不中会把代建永久挡在 page_loading 门后;
+// 备用组必须整组命中,不能放宽到「单词命中」而让首页混进来。
+func TestAppListMarkersAcceptBothUILanguages(t *testing.T) {
+	p := Portals["wecom"]
+	if len(p.AppListMarkersAlt) == 0 {
+		t.Fatal("企微未声明英文 UI 备用 markers")
+	}
+	zh := "首页 智能专区 智能机器人 机器人管理 企业创建的机器人 创建机器人"
+	en := "Homepage Intelligent Zone Intelligent robot\nIntelligent Bot Create 机器人管理\n权限管理 Plugin Workflow\n可管理企业和成员创建的机器人\nCreated by company\nCreate Bot\nEnglish"
+	if !markersRendered(p.AppListMarkers, zh) {
+		t.Fatal("中文列表页未被主 markers 组判定为已渲染")
+	}
+	if !markersRendered(p.AppListMarkersAlt, en) {
+		t.Fatalf("真机英文列表页未被备用 markers 组判定为已渲染:%s", en)
+	}
+	home := "首页 通讯录 智能专区 智能助理 智能机器人 工作台管理 韩业超"
+	if markersRendered(p.AppListMarkers, home) || markersRendered(p.AppListMarkersAlt, home) {
+		t.Fatal("后台首页文本不应通过列表页渲染校验")
+	}
+	engHome := "Homepage Intelligent Zone Intelligent robot Workspace Management"
+	if markersRendered(p.AppListMarkersAlt, engHome) {
+		t.Fatal("英文首页只命中单个词就通过,校验过松")
+	}
+}
+
+func TestSelectAppByNameAvoidsWrongCredentialSource(t *testing.T) {
+	apps := []AppRef{{Name: "测试", URL: "detail-old", NeedsClick: true},
+		{Name: "mcp-hub", URL: "detail-target", NeedsClick: true}}
+	if got := selectAppByName(apps, " mcp-hub "); got.URL != "detail-target" {
+		t.Fatalf("应按名称选择 mcp-hub,而非列表第一个「测试」: %+v", got)
+	}
+	if got := selectAppByName(apps, "not-found"); got.URL != "" {
+		t.Fatalf("未命中时绝不能回退第一个机器人: %+v", got)
+	}
+	if got := selectAppByName(nil, "mcp-hub"); got.URL != "" {
+		t.Fatalf("空列表应返回零值: %+v", got)
+	}
+
+	selected, names, found := resolveWeComApp(apps, "")
+	if found {
+		t.Fatalf("多机器人且未明确选择时不得自动选择: %+v", selected)
+	}
+	if strings.Join(names, ",") != "测试,mcp-hub" {
+		t.Fatalf("候选机器人顺序应稳定: %v", names)
+	}
+	if selected, _, found = resolveWeComApp(apps, "测试"); !found || selected.Name != "测试" {
+		t.Fatalf("用户明确选择「测试」才应命中: %+v/%v", selected, found)
+	}
+	if selected, _, found = resolveWeComApp(apps[:1], ""); !found || selected.Name != "测试" {
+		t.Fatalf("单机器人且无指定名称时允许明确回退: %+v/%v", selected, found)
 	}
 }
 

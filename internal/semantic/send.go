@@ -19,10 +19,20 @@ func SendText(ctx context.Context, reg *Registry, mgr *adapter.Manager, platform
 	return text2, err
 }
 
+// SendTextWithBot 回复事件时沿用来源机器人;botName 为空时交给下游做消歧。
+func SendTextWithBot(ctx context.Context, reg *Registry, mgr *adapter.Manager, platform, botName, chatID, text string) (string, error) {
+	res, err := Invoke(ctx, BuiltinCatalog(), mgr, ImSendText.Name, platform,
+		map[string]any{"target": chatID, "text": text, "bot_name": botName}, nil)
+	if err != nil {
+		return "", err
+	}
+	return res.Text, nil
+}
+
 // sendTextVia SendText 的实际实现,参数用 Caller 接口以便单测注入假下游。
 func sendTextVia(ctx context.Context, caller Caller, platform, chatID, text string) (string, error) {
 	res, err := Invoke(ctx, BuiltinCatalog(), caller, ImSendText.Name, platform,
-		map[string]any{"target": chatID, "text": text}, nil)
+		map[string]any{"target": chatID, "text": text, "bot_name": ""}, nil)
 	if err != nil {
 		return "", err
 	}

@@ -266,15 +266,20 @@ func wecomStages() []setupStage {
 		},
 		{
 			ID: "publish",
-			Action: &BrowserAction{Script: "wecom@2026-11-publish", Ops: []Op{
-				{Kind: "waitVisible", Target: menuCandidateSelector,
-					Match: `^\s*(发布|启用机器人|保存并启用|版本管理)(?:\s*\d+)?\s*$`, Scope: "probe"},
-				{Kind: "click", Target: menuCandidateSelector,
-					Match: `^\s*(发布|启用机器人|保存并启用|版本管理)(?:\s*\d+)?\s*$`, Scope: "probe"},
+			// 2026-11-12 真机创建 mcp-hub 时发现:企微智能机器人没有「版本 /
+			// 申请发布」概念,旧实现沿用 app_console 通用模板,导致
+			// setupPlan 在确认清单里输出「创建版本 1.0.0 并申请发布」;更危险的
+			// 是 probe 里的 click 会去点未校准的「发布/启用机器人」按钮、
+			// apply 里还会点「确定/发布」——都是可能不可逆的动作,而企微后台
+			// DOM 至今未端到端校准(stages.go 顶部诚实边界)。
+			// 改为纯只读状态核对 + ApplyNote 降级(not_required):
+			// 不创建版本、不点发布、不因选择器未命中而误报 selector_miss。
+			Action: &BrowserAction{Script: "wecom@2026-11-12-publish-readonly", Ops: []Op{
+				{Kind: "waitVisible", Target: "body", Scope: "probe"},
 				{Kind: "readPage", Scope: "probe"},
-				{Kind: "click", Target: menuCandidateSelector,
-					Match: `^\s*(确定|确认|发布|启用)\s*$`, Scope: "apply"},
 			}},
+			PlanLine:  "核对机器人启用状态(智能机器人无版本概念,不创建版本、不点发布)",
+			ApplyNote: "企微智能机器人无版本/申请发布流程,且后台 DOM 未真机校准;仅做只读状态核对,不执行任何发布动作。如需启用请在管理后台人工核对",
 			Done: func(text string) bool {
 				return strings.Contains(text, "已启用") || strings.Contains(text, "已发布")
 			},

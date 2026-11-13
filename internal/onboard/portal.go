@@ -52,6 +52,7 @@ type Portal struct {
 	// 为空表示该平台没有独立列表页(或尚未实测),不做任何自动导航。
 	AppListURL         string   // 应用列表页 URL
 	AppListMarkers     []string // 列表页可见文本特征,用于确认页面已渲染
+	AppListMarkersAlt  []string // 同一列表页的备用语言渲染特征(任一组全中即视为已渲染)
 	AppListRowSelector string   // 列表页已有应用的可点击元素(每行一个),读到即证明已有应用
 
 	// ---- 应用详情内的凭据 tab(2026-11-11 钉钉真机实测) ----
@@ -82,6 +83,7 @@ type Op struct {
 	Match       string   // JS 正则:按元素可见文本匹配(click/hover/fill),不依赖易变的 class
 	SkipIfMatch string   // clickInRow 专用:行文本命中该正则视为已达成,幂等跳过点击(如钉钉「已开通」)
 	Scope       string   // 适用阶段:"list" 仅应用列表页;"probe" 只读探测;"apply" 有副作用;空/detail 表示详情页可用
+	Optional    bool     // clickAt 专用:目标元素不存在时静默跳过(幂等,如 Secret 已生成后按钮消失)
 }
 
 // defaultMaskRune 飞书/钉钉类平台凭据掩码的默认字符(U+2217 ASTERISK OPERATOR)。
@@ -311,16 +313,38 @@ var Portals = map[string]*Portal{
 		URL:   "https://work.weixin.qq.com/",
 		Steps: []Step{
 			{ID: "login", Brief: "管理员登录企业微信后台", URLs: []string{"https://work.weixin.qq.com/"}},
-			{ID: "create-bot", Brief: "智能专区 → 智能机器人 → 创建(收发一体,长连接)", Detail: []string{
+			{ID: "create-bot", Brief: "智能专区 → 智能机器人 → 创建(API 模式,收发一体长连接)", Detail: []string{
+				"必须选「API 模式」才有 Bot ID / Secret 长连接凭据;普通模式用的是企微自带模型",
 				"创建后把机器人拉进目标群(此步人工)",
 				"备选:群机器人 webhook 只能发不能收,不推荐",
 			}, Browser: &BrowserAction{
-				Script: "wecom@2026-11-create",
+				// 2026-11-12 真机端到端校准(替换此前从未验证的「弹窗填名」推测版):
+				// 点「创建机器人」进入的是独立 SPA 页 #/aiHelper/create,不是弹窗;
+				// 名称框 input[placeholder="输入智能机器人名称"];默认「普通模式」,
+				// 必须切到「API 模式」(label.config_mode_card_radio)才会显示
+				// Bot ID / Secret 与「使用长连接」配置;提交按钮是「保存」
+				// (button.navi_button),不是「确定/创建」。
+				// 创建页可能是 hidden 标签,故全部用 clickAt/fillJS:rod 的
+				// MustClick/MustInput 会卡在 WaitStableRAF(见 browser.go)。
+				Script: "wecom@2026-11-12-create-api-mode",
 				Ops: []Op{
-					{Kind: "waitVisible", Target: menuCandidateSelector, Match: "^\\s*(创建机器人|创建智能机器人|新建机器人)\\s*$"},
-					{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(创建机器人|创建智能机器人|新建机器人)\\s*$"},
-					{Kind: "fill", Target: "input[placeholder*='名称'], [role=dialog] input[type=text], input[type=text]", Text: "$app_name"},
-					{Kind: "click", Target: menuCandidateSelector, Match: "^\\s*(确定|确认|提交|创建)\\s*$"},
+					// 已有创建页标签则直接复用(不重开、不导航走用户当前页),
+					// 否则把执行器导航到创建页。
+					{Kind: "navigate", Target: "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/create"},
+					{Kind: "waitVisible", Target: `input[placeholder="输入智能机器人名称"]`},
+					// radio label 本身无文本(标题在旁边的 div.config_mode_card_name),
+					// 真机 DOM 第 1 个是普通模式、第 2 个是 API 模式;radio 重复
+					// 点击不会取消选中,故此步幂等。
+					{Kind: "clickAt", Target: "label.config_mode_card_radio", Index: 1},
+					{Kind: "fillJS", Target: `input[placeholder="输入智能机器人名称"]`, Text: "$app_name"},
+					// 简介是必填项:2026-11-12 真机第一次保存后页面出现
+					// .t-textarea__tips--error「请输入简介」,未创建任何应用。
+					{Kind: "fillJS", Target: `textarea[placeholder="输入简介让大家快速了解智能机器人能做什么"]`, Text: "$app_name 集成机器人(API 模式,长连接)"},
+					// API 模式保存的硬前置:必须先「点击获取」生成 Secret,
+					// 否则 toast「生成Secret后方可保存机器人」且静默不创建。
+					// 生成后该 span 会从 DOM 消失,故 Optional=true 保证幂等。
+					{Kind: "clickAt", Target: "span.sdk-get-secret", Optional: true},
+					{Kind: "clickAt", Target: "button.navi_button", Match: `^\s*(保存|Save)\s*$`},
 				},
 			}},
 			{ID: "collect-creds", Brief: "复制 Bot ID / Secret", Cred: true,
@@ -354,11 +378,17 @@ var Portals = map[string]*Portal{
 		// 详情页只用 aibotid= 精确识别:列表页 /aiHelper/list 与详情页共用
 		// /wework_admin/frame 前缀,把前缀放进 CredPages 会把列表页误判成详情页。
 		// LoginHosts 只留真正的登录域 —— work.weixin.qq.com 是主域,误加会把详情页判成登录页。
-		CredPages:          []string{"aibotid="},
-		LoginHosts:         []string{"login.work.weixin.qq.com"},
-		AppIDRe:            regexp.MustCompile(`aibotid=(\d+)`),
-		AppListURL:         "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage",
-		AppListMarkers:     []string{"智能机器人", "机器人管理", "企业创建"},
+		CredPages:      []string{"aibotid="},
+		LoginHosts:     []string{"login.work.weixin.qq.com"},
+		AppIDRe:        regexp.MustCompile(`aibotid=(\d+)`),
+		AppListURL:     "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage",
+		AppListMarkers: []string{"智能机器人", "机器人管理", "企业创建"},
+		// 2026-11-12 真机:经 CDP /json/new 打开的列表页标签渲染成英文 UI
+		// (「Intelligent Bot Create / Created by company / Create Bot」),中文
+		// markers 一条都不中,listVerified 永远 false,硬闸门把代建彻底挡住。
+		// 2026-11-13 英文页面实测按钮文本变为 Intelligent Bot\nCreate + Create;
+		// Created by company 仍是列表数据区特征,不能用通用 Create 代替它。
+		AppListMarkersAlt:  []string{"Intelligent Bot Create", "Created by company"},
 		AppListRowSelector: `.d2c_bot_name`,
 		Perms:              []string{"收发消息"},
 		Validate:           ValidateWeCom,

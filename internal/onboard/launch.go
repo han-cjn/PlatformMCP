@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -84,6 +85,10 @@ func StartPlatform(platform string) (*StartResult, error) {
 			res.PageOpened = true // 目标页面已打开,不再新开标签干扰用户
 			res.URL = w.DetailURL // 返回真实停留的详情页,不要拿 Portal.URL 冒充"已打开"
 			res.ManualSteps = []string{}
+			// 2026-11-12 真机:提前返回也必须把详情页标签激活到前台。
+			// 否则 profile 里残留的官网营销页标签仍是用户看到的页面,工具却报
+			// ready_to_capture —— 表现就是「页面一直停在官网、看着像没干活」。
+			activatePlatformTab(p)
 			res.Next = "检测到你已登录且已停在凭据页,无需扫码、无需创建应用;" +
 				"请立即调用 hub.onboard.setup(confirmed=false) 拿该平台动作清单,用户确认后重调完成抓凭据→写 .env→热重载及适用的权限/发布。" +
 				"不要再提示用户登录、点应用或建应用;只需抓凭据时才用 hub.onboard.capture"
@@ -130,15 +135,32 @@ func StartPlatform(platform string) (*StartResult, error) {
 		}
 	}
 
-	res.PageOpened = openPlatformEntryTab(p, p.URL)
+	// 2026-11-12 用户截图报障:start 反复重试时浏览器里堆了 5 个「企业微信」
+	// 官网标签(work.weixin.qq.com/#/app/workbenchEditor/index 营销页),而真正
+	// 要操作的是管理后台 /wework_admin/frame。Portal.URL 是官网首页,有实测
+	// AppListURL 的平台(钉钉/企微)一律直接进管理后台,不再堆无用的官网标签。
+	entryURL := platformEntryURL(p)
+	res.URL = entryURL
+	res.PageOpened = openPlatformEntryTab(p, entryURL)
 	if !res.PageOpened {
-		// 调试端口不可用时的兜底:至少把页面呈现给用户(登录态可能不共享)
-		res.PageOpened = openURLWithSystem(p.URL)
+		// 调试端口不可用时的兜底:至少把页面呈现给用户(登录态可能不共享)。
+		// openURLWithSystem 自带节流,Agent 轮询重试 start 不会反复开同一个标签。
+		res.PageOpened = openURLWithSystem(entryURL)
 		if res.Warning == "" {
-			res.Warning = "调试 Chrome 中打开页面失败,已改用系统默认浏览器(登录态可能与调试实例不共享)"
+			res.Warning = "调试 Chrome 中打开页面失败,已改用系统默认浏览器(登录态可能与调试实例不共享;同一页面不会重复打开)"
 		}
 	}
 	return res, nil
+}
+
+// platformEntryURL 返回 start 应打开的真实入口页。
+// 只改 start 的落点,不动 Portal.URL 本身:官网首页仍是有效的登录入口,
+// 且 portalPageBelongs / matchURLPrefix 等判定都依赖它,改数据面影响更大。
+func platformEntryURL(p *Portal) string {
+	if p != nil && p.AppListURL != "" {
+		return p.AppListURL
+	}
+	return p.URL
 }
 
 // readyToCapture 是 start 提前返回 ready_to_capture 的闸门。
@@ -223,6 +245,28 @@ func findChrome() (string, error) {
 	return "", fmt.Errorf("未找到 Chrome/Chromium 可执行文件(可用 CHROME_BIN 指定)")
 }
 
+// chromeLaunchArgs 是调试 Chrome 的唯一启动参数来源。
+// scripts/chrome-debug.sh 必须与之保持同步(同一 profile、同一组 flag)。
+//
+// 2026-11-12 第十四轮真机实测(README):本机不带 GPU 相关 flag 时调试 Chrome
+// 会 exit 133 / "GPU process isn't usable" → start 起不出实例 → 每轮重试都
+// 走 openURLWithSystem 兜底,在日常浏览器里堆标签。
+// --window-size 同轮报障补齐:企微/钉钉管理后台是固定宽度布局,默认窗口过窄
+// 会横向溢出(左侧导航被裁掉半个词、底部出现横向滚动条),即「样式错乱」。
+func chromeLaunchArgs(profile string) []string {
+	return []string{
+		"--remote-debugging-port=9222",
+		"--user-data-dir=" + profile,
+		"--profile-directory=Default",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--no-sandbox",
+		"--disable-gpu",
+		"--disable-software-rasterizer",
+		"--window-size=1440,900",
+	}
+}
+
 // startDebugChrome 后台启动常驻调试实例。
 //
 // 关键点:Hub 在 stdio 模式下 stdout 是 MCP 协议通道,子进程的 stdio 必须
@@ -232,13 +276,7 @@ func startDebugChrome(bin, profile string) error {
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		return fmt.Errorf("创建 profile 目录失败: %w", err)
 	}
-	args := []string{
-		"--remote-debugging-port=9222",
-		"--user-data-dir=" + profile,
-		"--profile-directory=Default",
-		"--no-first-run",
-		"--no-default-browser-check",
-	}
+	args := chromeLaunchArgs(profile)
 	// 后台直接 exec(实测 /usr/bin/open -na 会把 --remote-debugging-port 等
 	// 参数丢掉,起出来的是不带调试端口的普通实例)。stdio 全部丢弃防止污染
 	// MCP 协议通道;Setsid 让 Chrome 脱离 Hub 会话,Hub 退出不连带关闭浏览器;
@@ -270,7 +308,23 @@ func startDebugChrome(bin, profile string) error {
 // URL 精确匹配的幂等判断失效,Agent 每次重试 start 都会再开一个标签。
 // 入口页只要求「该平台域内已有标签」,命中即激活到前台、不再新开;具体应用
 // 详情页仍走 openDebugTab 的精确匹配,避免 setup 把首页误当成详情页。
+//
+// entryPendingTab 补上第二层幂等:新标签刚创建时 URL 还是 about:blank,
+// 不属于任何平台域,上面的循环命中不了。ensureAppListTab 早已用同样的
+// pending 机制解决列表页,入口页漏了这一层 —— 2026-11-12 用户截图里
+// 连开 5 个「企业微信」标签即由此而来。
+var entryPendingTab = struct {
+	sync.Mutex
+	byPlatform map[string]string
+}{byPlatform: map[string]string{}}
+
 func openPlatformEntryTab(p *Portal, rawURL string) bool {
+	key := ""
+	if p != nil {
+		key = p.Name
+	}
+	entryPendingTab.Lock()
+	defer entryPendingTab.Unlock()
 	if p != nil {
 		if resp, err := cdpHTTPClient.Get(chromeDebugURL + "/json/list"); err == nil {
 			var items []struct {
@@ -281,16 +335,38 @@ func openPlatformEntryTab(p *Portal, rawURL string) bool {
 			ok := json.NewDecoder(resp.Body).Decode(&items) == nil
 			resp.Body.Close()
 			if ok {
+				// 优先激活「有用的」页面:调试 profile 里常同时残留官网营销页
+				// (work.weixin.qq.com/#/app/workbenchEditor/index)和管理后台标签,
+				// 只按域匹配会激活前者,用户以为 start 没把自己带进后台。
+				for _, it := range items {
+					if it.Type == "page" && portalPageBelongs(p, it.URL) &&
+						(isAppListPage(p, it.URL) || portalDetailMatch(p, it.URL)) {
+						activateDebugTab(it.ID)
+						delete(entryPendingTab.byPlatform, key)
+						return true
+					}
+				}
+				// 退化:登录页/入口页也算「已打开」,避免 302 后反复新开。
 				for _, it := range items {
 					if it.Type == "page" && portalPageBelongs(p, it.URL) {
 						activateDebugTab(it.ID)
+						delete(entryPendingTab.byPlatform, key)
 						return true
 					}
 				}
 			}
 		}
+		// 标签已创建但仍在加载中:URL 还不属于本平台域,靠 ID 兜底复用。
+		if id := entryPendingTab.byPlatform[key]; id != "" && debugTabAlive(id) {
+			activateDebugTab(id)
+			return true
+		}
 	}
-	return openDebugTab(rawURL)
+	id, ok := openDebugTabID(rawURL)
+	if ok && id != "" && key != "" {
+		entryPendingTab.byPlatform[key] = id
+	}
+	return ok
 }
 
 // openDebugTab 通过 CDP 的 /json/new 在调试实例里开新标签,并把目标标签切到前台。
@@ -347,6 +423,46 @@ func openDebugTabID(rawURL string) (string, bool) {
 	return "", true
 }
 
+// activatePlatformTab 只读地把目标平台「最有用」的标签切到前台,绝不新开标签。
+// 优先级与 openPlatformEntryTab 一致:详情页 > 应用列表页 > 任意域内标签。
+// start 的 ready_to_capture 提前返回分支用它,避免「已就绪但前台是残留官网页」。
+func activatePlatformTab(p *Portal) bool {
+	if p == nil {
+		return false
+	}
+	resp, err := cdpHTTPClient.Get(chromeDebugURL + "/json/list")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var items []struct {
+		Type string `json:"type"`
+		URL  string `json:"url"`
+		ID   string `json:"id"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&items) != nil {
+		return false
+	}
+	fallback := ""
+	for _, it := range items {
+		if it.Type != "page" || !portalPageBelongs(p, it.URL) {
+			continue
+		}
+		if portalDetailMatch(p, it.URL) || isAppListPage(p, it.URL) {
+			activateDebugTab(it.ID)
+			return true
+		}
+		if fallback == "" {
+			fallback = it.ID
+		}
+	}
+	if fallback != "" {
+		activateDebugTab(fallback)
+		return true
+	}
+	return false
+}
+
 // activateDebugTab 把指定标签切到前台(CDP /json/activate/<id>)。
 // 激活失败不影响页面已打开这一结果,故静默忽略。
 func activateDebugTab(id string) {
@@ -360,7 +476,34 @@ func activateDebugTab(id string) {
 	resp.Body.Close()
 }
 
+// systemOpenRun 可注入,单测里替换掉以免真的拉起系统浏览器。
+var systemOpenRun = func(rawURL string) error {
+	return exec.Command("open", rawURL).Run()
+}
+
+// systemOpenGuard 防止 start 重试时在系统默认浏览器里反复打开同一入口页。
+// 调试 Chrome 起不来的场景(见 chromeLaunchArgs 的 GPU flag),Agent 每轮询
+// 一次就重试一次 start,旧实现每次都调 `open <url>` → 日常浏览器标签无限
+// 堆积;这些标签不受 CDP 管辖,执行器再也找不到目标页面,于是继续重试。
+var systemOpenGuard = struct {
+	sync.Mutex
+	lastURL string
+	lastAt  time.Time
+}{}
+
+const systemOpenThrottle = 5 * time.Minute
+
 // openURLWithSystem 兜底:macOS 用 open 交给默认浏览器。
+// 返回 true 表示目标页面已呈现给用户(含命中节流、本次未重复打开的情况)。
 func openURLWithSystem(rawURL string) bool {
-	return exec.Command("open", rawURL).Run() == nil
+	systemOpenGuard.Lock()
+	defer systemOpenGuard.Unlock()
+	if systemOpenGuard.lastURL == rawURL && time.Since(systemOpenGuard.lastAt) < systemOpenThrottle {
+		return true
+	}
+	if err := systemOpenRun(rawURL); err != nil {
+		return false
+	}
+	systemOpenGuard.lastURL, systemOpenGuard.lastAt = rawURL, time.Now()
+	return true
 }

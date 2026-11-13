@@ -235,7 +235,30 @@ func (bx *BrowserExecutor) RunAction(act *BrowserAction, creds map[string]string
 	return nil
 }
 
+// ensurePageVisible 在任何交互 Op 之前把绑定的标签切到前台。
+//
+// 2026-11-12 真机分步诊断(堆栈留证 /tmp/hub-step-probe.log):调试 profile 里
+// 常同时留着官网营销页/新标签页,执行器即使按平台选中了详情页,该标签仍可能是
+// visibilityState=hidden。Chrome 会暂停后台标签的 requestAnimationFrame,于是
+// rod 的 Element.Click → WaitInteractable → ScrollIntoView → WaitStableRAF
+// 永久等不到回调,CDP 调用挂死,直到会话 ctx(25s)到期,对外表现为
+// capture_failed / "context deadline exceeded"。
+// 复现条件与第十七轮相同(详情页已渲染、复制图标可定位、坐标在视口内),
+// 唯一差异就是标签不在前台 —— 所以必须在执行器层兜住,不能靠调用方记得点激活。
+func (bx *BrowserExecutor) ensurePageVisible() {
+	if bx == nil || bx.page == nil {
+		return
+	}
+	_ = bx.safe(func() {
+		// 只把标签切到前台(有助于剪贴板权限与输入事件),不等待 visibilityState:
+		// 窗口最小化 / 不在 macOS 前台时它仍是 hidden,而点击已改为 CDP 坐标
+		// 派发、不依赖 rAF,无需在这里耗掉会话预算。
+		_, _ = bx.page.Activate()
+	})
+}
+
 func (bx *BrowserExecutor) runOp(op Op, creds map[string]string) error {
+	bx.ensurePageVisible()
 	switch op.Kind {
 	case "navigate":
 		return bx.safe(func() {
@@ -269,6 +292,10 @@ func (bx *BrowserExecutor) runOp(op Op, creds map[string]string) error {
 			}
 			el.Timeout(browserClickTimeout).MustClick()
 		})
+	case "clickAt": // CDP 坐标点击,不依赖 WaitStableRAF(见 clickByCoords 注释)
+		return bx.clickByCoords(op)
+	case "fillJS": // 纯 JS setter 填值,不依赖 rod 的 MustInput/WaitInteractable
+		return bx.fillByJS(op, creds)
 	case "clickInRow": // 按行文本定位,再点该行内的动作按钮(见下方方法注释)
 		return bx.clickInRow(op)
 	case "hover": // 飞书 Secret 按钮组是 hover 才展开的(2026-11 实测)
@@ -602,6 +629,103 @@ func (bx *BrowserExecutor) pick(op Op) (*rod.Element, error) {
 // Text 为复制按钮选择器。按「文本最短」排序取最小容器,避免 Client ID / Client
 // Secret 同处一个 <tr> 时误点 Client ID 的复制按钮。找不到就 selector_miss 降级,
 // 绝不猜按钮、绝不重试。
+// clickAtGeoJS 按 CSS 选择器(可选可见文本正则)定位元素,滚入视口后返回中心坐标。
+// 全部在页面里同步完成,不触发 rod 的 WaitInteractable / WaitStableRAF。
+const clickAtGeoJS = `({sel, match, index}) => {
+	const els = [...document.querySelectorAll(sel)];
+	const re = match ? new RegExp(match) : null;
+	// 无 Match 时按 Index 取(与既有 pick() 的 0-based 语义一致):
+	// 企微模式 radio 的 label 自身没有文本,文本在旁边的卡片标题里,
+	// 只能靠「第 2 个 label = API 模式」定位(2026-11-12 真机)。
+	const el = re ? els.find(e => re.test((e.innerText || e.textContent || "").trim())) : els[index];
+	if (!el) return "not-found:" + sel;
+	el.scrollIntoView({block: "center", inline: "center"});
+	const r = el.getBoundingClientRect();
+	return JSON.stringify({x: r.left + r.width/2, y: r.top + r.height/2,
+		w: r.width, h: r.height,
+		inViewport: r.top >= 0 && r.top < innerHeight && r.left >= 0 && r.left < innerWidth});
+}`
+
+// fillByJSJS 用原生 value setter + input/change 事件写值(React 受控组件标准填法)。
+const fillByJSJS = `({sel, val}) => {
+	const el = document.querySelector(sel);
+	if (!el) return "__not_found__";
+	const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+	const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+	setter.call(el, val);
+	el.dispatchEvent(new Event("input", {bubbles: true}));
+	el.dispatchEvent(new Event("change", {bubbles: true}));
+	return el.value;
+}`
+
+// clickByCoords 用 CDP 原生鼠标事件按坐标点击,不依赖标签可见性。
+//
+// 2026-11-12 真机:rod 的 Element.Click → WaitInteractable → ScrollIntoView →
+// WaitStableRAF 在 hidden 标签上永久挂住(rAF 被 Chrome 暂停),一直耗到 25s
+// 会话上限。copyToCred 已用坐标点击绕过,这里把同一模式抽成声明式 Op,
+// 供企微创建表单在后台标签上执行。只改新增 kind,不影响既有 click 链路。
+func (bx *BrowserExecutor) clickByCoords(op Op) error {
+	if op.Index < 0 {
+		return fmt.Errorf("clickAt 的 Index 不能为负数(%d)", op.Index)
+	}
+	return bx.safe(func() {
+		// 2026-11-12 真机:创建页停在 hidden 标签时,坐标/落点/disabled 全部
+		// 正确(elementFromPoint 命中按钮内部),但 CDP 鼠标事件不触发 React 的
+		// onClick,「保存」静默无效;Activate 后 visibilityState=visible +
+		// hasFocus=true 即可正常提交。激活是只读 UI 操作,不改变页面内容。
+		_, _ = bx.page.Activate()
+		geo, err := bx.page.Timeout(browserOpTimeout).Eval(clickAtGeoJS,
+			map[string]any{"sel": op.Target, "match": op.Match, "index": op.Index})
+		if err != nil {
+			panic(err)
+		}
+		raw := geo.Value.Str()
+		if strings.HasPrefix(raw, "not-found:") {
+			// 幂等:某些一次性动作(如「点击获取」生成 Secret)完成后按钮会
+			// 从 DOM 消失,重跑同一套 Ops 时不应报错,更不该当成 selector_miss。
+			if op.Optional {
+				return
+			}
+			panic(fmt.Errorf("clickAt 未找到可点击元素(%s / %s)", op.Target, op.Match))
+		}
+		var pt struct {
+			X, Y, W, H float64
+			InViewport bool
+		}
+		if err := json.Unmarshal([]byte(raw), &pt); err != nil {
+			panic(fmt.Errorf("解析 clickAt 坐标失败: %w (%s)", err, raw))
+		}
+		if pt.W <= 0 || pt.H <= 0 || !pt.InViewport {
+			panic(fmt.Errorf("clickAt 元素不在可点击视口(w=%.0f h=%.0f inViewport=%v),不盲点", pt.W, pt.H, pt.InViewport))
+		}
+		if err := bx.page.Mouse.MoveTo(proto.Point{X: pt.X, Y: pt.Y}); err != nil {
+			panic(err)
+		}
+		if err := bx.page.Mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
+			panic(err)
+		}
+	})
+}
+
+// fillByJS 纯 JS 填值 + 读回校验,避免 MustInput 的 WaitInteractable 在 hidden
+// 标签上挂死;读回不一致立即报错,绝不带着空名称去提交创建表单。
+func (bx *BrowserExecutor) fillByJS(op Op, creds map[string]string) error {
+	text := op.Text
+	if v, ok := strings.CutPrefix(text, "$env:"); ok {
+		text = creds[v]
+	}
+	return bx.safe(func() {
+		res, err := bx.page.Timeout(browserOpTimeout).Eval(fillByJSJS,
+			map[string]string{"sel": op.Target, "val": text})
+		if err != nil {
+			panic(err)
+		}
+		if res.Value.Str() != text {
+			panic(fmt.Errorf("fillJS 读回不一致: 期望 %q,实际 %q", text, res.Value.Str()))
+		}
+	})
+}
+
 func (bx *BrowserExecutor) copyToCred(op Op) error {
 	if op.ExtractKey == "" {
 		return fmt.Errorf("copyToCred 需要 ExtractKey")
@@ -632,12 +756,40 @@ func (bx *BrowserExecutor) copyToCred(op Op) error {
 		if res.Value.Str() != "ok" {
 			panic(fmt.Errorf("未找到文本匹配 /%s/ 且带复制按钮的凭证块(页面结构已变?)", op.Match))
 		}
-		// 3) 真实鼠标点击:React 的 onClick 需要 trusted 事件,不能用 JS el.click()
-		el, err := bx.page.Timeout(browserOpTimeout).Element(`[data-hub-copy="1"]`)
+		// 3) 真实鼠标点击:React 的 onClick 需要 trusted 事件,不能用 JS el.click()。
+		//    2026-11-12 真机分步诊断:el.Click() 内部走 WaitInteractable →
+		//    ScrollIntoView → WaitStableRAF,后台/hidden 标签的 rAF 被 Chrome
+		//    暂停时会永久挂住,直到会话 ctx(25s)到期,对外是 capture_failed。
+		//    改为与 copyInFrame 一致:读元素几何后用 CDP 原生鼠标事件按坐标点击,
+		//    不依赖 rAF,也不要求窗口处于前台。
+		geo, err := bx.page.Timeout(browserOpTimeout).Eval(`() => {
+			const el = document.querySelector('[data-hub-copy="1"]');
+			if (!el) return 'not-found';
+			const r = el.getBoundingClientRect();
+			return JSON.stringify({x: r.left + r.width/2, y: r.top + r.height/2,
+				w: r.width, h: r.height,
+				inViewport: r.top >= 0 && r.top < innerHeight && r.left >= 0 && r.left < innerWidth});
+		}`)
 		if err != nil {
 			panic(err)
 		}
-		if err := el.Timeout(browserClickTimeout).Click(proto.InputMouseButtonLeft, 1); err != nil {
+		if geo.Value.Str() == "not-found" {
+			panic("定位后复制按钮消失,不盲点")
+		}
+		var pt struct {
+			X, Y, W, H float64
+			InViewport bool
+		}
+		if err := json.Unmarshal([]byte(geo.Value.Str()), &pt); err != nil {
+			panic(fmt.Errorf("解析复制按钮坐标失败: %w", err))
+		}
+		if pt.W <= 0 || pt.H <= 0 || !pt.InViewport {
+			panic(fmt.Errorf("复制按钮不在可点击视口内(w=%.0f h=%.0f inViewport=%v),不盲点", pt.W, pt.H, pt.InViewport))
+		}
+		if err := bx.page.Mouse.MoveTo(proto.Point{X: pt.X, Y: pt.Y}); err != nil {
+			panic(err)
+		}
+		if err := bx.page.Mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
 			panic(err)
 		}
 		// 4) 轮询读 hook 捕获值(复制可能是异步的)

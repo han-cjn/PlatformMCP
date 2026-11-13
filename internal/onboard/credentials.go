@@ -5,6 +5,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/example/mcp-hub/internal/config"
 )
 
 // CredField 描述一个待收集的凭据字段。Agent 用它渲染表单/选择框,
@@ -37,9 +39,11 @@ func (e *CredError) Error() string { return e.Phase + ": " + e.Message }
 // Validate/Reload 允许单测替换,SkipSetEnv 让单测不污染进程环境。
 type CredOptions struct {
 	EnvPath    string
+	ConfigPath string // 企微命名机器人配置;默认 config.json,测试可隔离
 	Validate   func(map[string]string) error
 	Reload     func(map[string]string) error
 	SkipSetEnv bool
+	BotName    string // 企微命名机器人;空值保持旧版 .env 单机器人行为
 }
 
 // commitCredentials 是所有接入路径共用的收尾:
@@ -77,14 +81,53 @@ func commitCredentials(platform string, values map[string]string, opts CredOptio
 		return nil, &CredError{"verify_failed", "该平台未定义真连校验,拒绝写入未经校验的凭据"}
 	}
 	if err := validate(env); err != nil {
-		return nil, &CredError{"verify_failed", err.Error() + ";未写入 .env"}
+		return nil, &CredError{"verify_failed", err.Error() + ";未写入凭据配置"}
 	}
 
 	path := opts.EnvPath
 	if path == "" {
 		path = ".env"
 	}
-	if err := UpsertEnv(path, env); err != nil {
+	if platform == "wecom" && strings.TrimSpace(opts.BotName) != "" {
+		name := strings.TrimSpace(opts.BotName)
+		idKey, secretKey := config.WeComBotEnvKeys(name)
+		envValues := map[string]string{idKey: env["WECOM_BOT_ID"], secretKey: env["WECOM_BOT_SECRET"]}
+		if err := UpsertEnv(path, envValues); err != nil {
+			return nil, &CredError{"write_failed", "写入 .env 凭据失败: " + err.Error()}
+		}
+		configPath := opts.ConfigPath
+		if configPath == "" {
+			configPath = "config.json"
+		}
+		if err := config.UpsertWeComBot(configPath, name, "$"+idKey, "$"+secretKey); err != nil {
+			return nil, &CredError{"write_failed", "写入 config.json 的 wecom.bots 引用失败: " + err.Error()}
+		}
+		// 热重载前模拟真实启动链: .env → 环境 → config.Load;避免留下未解析的引用。
+		previous := map[string]*string{}
+		for _, key := range []string{idKey, secretKey} {
+			if value, ok := os.LookupEnv(key); ok {
+				v := value
+				previous[key] = &v
+			} else {
+				previous[key] = nil
+			}
+			if err := os.Setenv(key, envValues[key]); err != nil {
+				return nil, &CredError{"write_failed", "设置进程内命名机器人凭据失败: " + err.Error()}
+			}
+		}
+		defer func() {
+			for key, value := range previous {
+				if value == nil {
+					_ = os.Unsetenv(key)
+				} else {
+					_ = os.Setenv(key, *value)
+				}
+			}
+		}()
+		if _, err := config.Load(configPath); err != nil {
+			return nil, &CredError{"write_failed", "命名机器人配置写入后校验失败: " + err.Error()}
+		}
+	} else if err := UpsertEnv(path, env); err != nil {
 		return nil, &CredError{"write_failed", err.Error()}
 	}
 	if !opts.SkipSetEnv {
@@ -106,6 +149,7 @@ type SetCredentialsResult struct {
 	Platform  string      `json:"platform"`
 	Phase     string      `json:"phase"` // done / incomplete / invalid_format / verify_failed / write_failed / reload_failed / unsupported
 	Collected []string    `json:"collected"`
+	BotName   string      `json:"bot_name,omitempty"`
 	Required  []CredField `json:"required,omitempty"`
 	Message   string      `json:"message,omitempty"`
 	Next      string      `json:"next"`
@@ -134,9 +178,13 @@ func SetCredentials(platform string, values map[string]string, opts CredOptions)
 	}
 	res.Phase = "done"
 	res.Collected = collected
+	res.BotName = strings.TrimSpace(opts.BotName)
 	res.Required = nil
-	res.Next = "凭据已写入 .env 并完成热重载;调用 hub.health 确认 credentials=true / mounted=true。" +
+	res.Next = "凭据已写入 .env 并完成本次接入回调;调用 hub.health 确认 credentials=true / mounted=true。" +
 		"若该平台还有权限/发布环节,可继续调用 hub.onboard.setup;全程无需在终端执行任何命令"
+	if platform == "wecom" && res.BotName != "" {
+		res.Next = "机器人「" + res.BotName + "」的凭据已写入 .env,config.json 的 wecom.bots 仅保存变量引用;其他机器人配置未修改"
+	}
 	return res, nil
 }
 
@@ -149,9 +197,9 @@ func credentialNext(phase string) string {
 	case "verify_failed":
 		return "真连校验未通过,凭据未写入 .env;核对平台、凭据是否属于同一应用/企业,或平台是否可达后重试。也可改走 hub.onboard.setup 自动抓取"
 	case "write_failed":
-		return "写 .env 失败,检查工作目录写权限后重试;未产生热重载"
+		return "写入或校验本地凭据配置失败;请按 message 修正文件权限、既有配置引用或环境变量后重试"
 	case "reload_failed":
-		return "凭据已写入 .env,但热重载失败;在连接器页面禁用/启用 mcp-hub 即可生效"
+		return "凭据已写入,但本次接入回调失败;在连接器页面禁用/启用 mcp-hub 后重试"
 	default:
 		return "按 message 修正后重试,或调用 hub.onboard.setup 由浏览器自动抓取凭据"
 	}

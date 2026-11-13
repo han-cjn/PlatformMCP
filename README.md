@@ -27,6 +27,9 @@
 - 钉钉 Stream 模式接收消息
 - 企微智能机器人收发一体
 - 事件统一落库、去重、重试，支持 `#记录` 指令写入表格
+- **企微上行链路自检**：适配器把 6 类消息帧 POST 到 `HUB_EVENT_URL`（未配置时回落 `http://127.0.0.1:9780/events`），Hub 的 `/events` 落库时顺带 `NoteChat` 沉淀 `chat_id`，`hub.chats` 才有企微会话。若适配器启动时 stderr 显示「事件上报: (已关闭…)」或 `events` 表长时间无新增，检查 `HUB_EVENT_URL` 是否被显式设成空串、以及凭据是否失效。**机器人删除/重建后，旧 chatid 会永久留在 `chats` 表（该表无 TTL、不记录 bot 维度），发送前必须确认目标群，不要直接复用 `hub.chats` 里的历史 ID。**
+- **企微主动推送前置条件与限频**：见下方[企微主动推送：会话激活与 846607 排查](#企微主动推送会话激活与-846607-排查)。
+- **机器人删除后由 Agent 代建**：`hub.onboard.setup(wecom, confirmed=false)` 在「已确认列表页渲染完成 + 列表为空」时返回 `need_create_app`，确认清单首条即「创建应用「mcp-hub」」；用户确认后 `confirmed=true` 由 `CreateApp` 代填提交表单并自动 `Capture` 写 `.env`。**创建不可撤销，确认门是硬约束**；`create-bot` Ops 已在 2026-11-12 第二十一轮按真机 DOM 端到端校准（独立创建页 / API 模式 / 必填简介 / 先生成 Secret / 保存），`dom_verified` 仍保持 `false`（权限开通阶段未校准，整体标记不扩张）。2026-11-12 真机修复了三个让代建永不触发的缺陷：① 后台首页「工作台管理」链接 `#/app/workbenchEditor/index` 被 `portalAppID` 的 `appIDFromURL` 宽匹配抽成 `workbenchEditor`，冒充已有机器人 → `create_app.go` 新增 `appLinkIsPlatformApp`，声明了 `AppIDRe` 的平台只认真实 ID 格式（飞书保留宽匹配）；② `listExistingApps` 的 `a[href]` 扫描缺管理区域隔离 → `app_list.go` 新增 `pageInAdminArea`；③ `CreateApp` 幂等门与 `openAppForSetup` 忽略 `listVerified` → 未确认渲染完成时返回 `page_loading`，不复用脏条目、也不误创建。修复后真机：`listExistingApps verified=true / count=0`，`Setup(false)` plan 首条出现「创建应用」。`setupPlan` 对企微的「创建版本 1.0.0 并申请发布」已删除（`stages.go` 的 wecom publish 阶段改为只读状态核对 + `not_required` 降级，不再点未校准的发布按钮）；**仍推荐走 `create_app(confirmed=true)`**，它只做「建机器人 + 抓凭据」。
 
 ### 日报
 
@@ -77,6 +80,21 @@ cp config.example.json config.json
 ```
 
 配置文件定义了下游 MCP Server 的启动方式、语义路由、推送目标等。`$ENV` 语法会从 `.env` 展开。
+
+**企微多机器人**（顶层 `wecom.bots`）：
+
+```json
+"wecom": {
+  "bots": [
+    { "name": "mcp-hub", "bot_id": "$WECOM_BOT_ID", "secret": "$WECOM_BOT_SECRET" },
+    { "name": "测试", "bot_id": "$WECOM_TEST_BOT_ID", "secret": "$WECOM_TEST_BOT_SECRET" }
+  ]
+}
+```
+
+单个机器人时保持旧版 `WECOM_BOT_ID` / `WECOM_BOT_SECRET` 即可；配置多个机器人后，`im.send_text` 必须显式带 `bot_name`，**Hub 不会自动选择第一个**，未明确选择会返回候选清单，未知名称返回 `unknown_bot`。接入多个机器人用 `hub.onboard.capture` 的 `app_name` / `hub.onboard.setup` 的 `app_name` 明确指定；原始凭据只写 `.env` 的独立变量，`wecom.bots[]` 仅保存 `$ENV` 引用，不覆盖其他机器人。定时推送无法临时追问用户，须在 `report.bot_name` 显式配置发送身份；未配置时拒绝推送。
+
+2026-11-13 真机复核：后台确认「测试 / mcp-hub」两个候选；未指定接入返回 `need_bot_selection`，未知或身份不符在读取凭据前拒绝。用户明确选择「测试」后完成抓取、真连校验与独立环境变量引用写入；同一适配器进程的两个真实客户端均收到 `authenticated`，未调用发送接口、未发送真实消息。`hub.health.mounted=true` 仅表示 MCP 初始化与工具枚举成功，不代表各 WebSocket 已认证；独立验证进程也不等于宿主热重载。当前会话连接器管理接口未注册 `mcp-hub`，需在连接器管理页禁用/启用或新开会话加载新二进制。
 
 ### 3. 运行
 
@@ -148,13 +166,53 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 
 | 能力 | 领域入参 | 说明 |
 |---|---|---|
-| `im.send_text` | `target`, `text`, `title?`, `format?` | 发送消息（plain/markdown） |
+| `im.send_text` | `target`, `text`, `title?`, `format?`, `bot_name?` | 发送消息（plain/markdown）；企微多机器人必须明确 `bot_name` |
 | `doc.create` | `title`, `markdown` | 创建文档 |
 | `doc.append` | `doc_id`, `markdown`, `position?` | 追加内容（仅腾讯） |
 | `doc.search` | `keyword` | 搜索文档 |
 | `table.query` | `app`, `table`, `filters?`, `conjunction?`, `page_size?` | 查询记录 |
 | `table.create` | `app`, `table`, `records`, `idempotency_key?` | 插入记录（幂等） |
 | `table.update` | `app`, `table`, `records` | 更新记录 |
+
+### 企微主动推送：会话激活与 846607 排查
+
+长连接智能机器人支持不依赖当次回调的主动推送，但**有 `chatid` 不等于允许推送**。根据企微官方[主动推送消息](https://developer.work.weixin.qq.com/document/path/101837)：
+
+1. 用户必须先在目标会话中给机器人发过消息，之后机器人才能向该会话主动推送。
+2. 群聊 `chatid` 应从回调事件中获取；单聊目标为用户的 `userid`。
+3. 同一会话的回复和主动推送合计最多 **30 条/分钟、1000 条/小时**。
+
+推荐操作顺序：
+
+1. 将用户明确选择的机器人加入目标群。
+2. 用户在群里 @该机器人发一条消息，完成会话激活。
+3. 确认适配器已向 Hub 上报事件；`hub.chats` 中出现该群记录，且事件载荷的 `bot_name` 是所选机器人。
+4. 使用新事件中的 `chatid` 和明确的 `bot_name` 调用 `im.send_text`。多个机器人不得默认选择第一项，也不得失败后自动改选其他机器人重发。
+
+调用示例（群 ID 仅为占位符，不要直接复用历史缓存）：
+
+```json
+{
+  "platform": "wecom",
+  "target": "wr_xxx_from_current_group_event",
+  "text": "今晚20点开会",
+  "format": "markdown",
+  "bot_name": "mcp-hub"
+}
+```
+
+`846607 aibot send msg frequency limit exceeded` 的字面含义是频率超限，但也可能出现在目标会话未与机器人建立交互时。排查顺序：
+
+| 检查项 | 处理方式 |
+|---|---|
+| 目标群是否与所选机器人互动过 | 先 @该机器人发消息，不要仅更换旧群 ID 或换机器人重试 |
+| `bot_name` 是否明确且与群事件一致 | 多机器人必须由用户选择；未知名称直接拒绝 |
+| 是否命中同会话限频 | 合并通知、减少自动重试；遵守 30 条/分钟、1000 条/小时 |
+| 真实平台错误是什么 | 保留返回的 `errcode`、`errmsg`、`req_id`，不要按 `[object Object]` 猜测 |
+
+适配器已处理 SDK 以普通错误帧 reject 的情况，发送失败会返回真实 `errcode/errmsg/req_id`，不再被 `String(err)` 格式化为 `[object Object]`。**遇到失败不会自动切换机器人或向多个群重发。**
+
+2026-11-13 真机验证：使用旧群缓存调用 `mcp-hub` 曾返回 `846607`；用户在目标群与该机器人完成互动、Hub 收到两条真实群事件后，以同一个 `chatid` 和 `bot_name=mcp-hub` 再次调用，成功发送“今晚20点开会”。这验证了会话激活前置条件；不代表旧缓存可长期作为群身份依据。
 
 ## 接入向导
 
@@ -246,6 +304,59 @@ go run ./cmd/hub -config config.json -run-report [-report-date 2026-11-06]
 - **真机验证**：完整 `Capture(wecom)` 两次均 `phase=done`、`collected=[WECOM_BOT_ID, WECOM_BOT_SECRET]`、长连接真连校验通过（`长连接认证成功`）、`.env` 落库（35 / 43 位、均无掩码）、复跑幂等。
 - **顺带修一个真实缺陷**：`ValidateWeCom` 用相对路径 `adapters/wecom-aibot-mcp/server.js` 起适配器子进程，工作目录依赖调用方——测试从 `internal/onboard` 跑时相对路径解析失败、真连验证误报「找不到模块」。修法：`cmd.Dir = moduleRoot()`（回溯到 `go.mod` 所在目录），与调用方工作目录解耦。
 - **gate 口径**：企微 `app_list_verified` 据实测标 `true`（列表页可直达、行可点进详情）；`dom_verified` **保持 `false`**——`create-bot`（创建）与权限开通未真机校准，只验证了抓取链路；`tabs_verified` 保持 `false`（企微详情页是 aibotid 参数直达，非 tab 切换，该 gate 不适用）。未创建机器人、未改权限、未点发布、未回显任何凭据值。
+
+**第十八轮：修 start 连开官网标签 + 后台页面样式错乱**（2026-11-12）：用户三张截图报障——浏览器堆了 5 个「企业微信」官网标签、`/wework_admin/frame` 左侧主导航被裁且底部出现横向滚动条、执行过程反复停在列表页抓不到凭据。
+
+| # | 根因 | 证据 |
+|---|---|---|
+| ① | `Portals["wecom"].URL` 是官网首页（跳 `#/app/workbenchEditor/index` 营销页），不是管理后台；`start` 每次重试都拿它当落点 | `portal.go:311`、`launch.go` 旧兜底分支 |
+| ② | 两处启动参数缺第十四轮实测必需的 `--no-sandbox --disable-gpu --disable-software-rasterizer`，本机默认参数 `exit 133 / GPU process isn't usable` ⇒ 调试 Chrome 起不来 ⇒ 每轮重试都走 `openURLWithSystem` 兜底，在**日常浏览器**里开不受 CDP 管辖的标签；旧实现无节流 | `README.md` 第十四轮、`launch.go` / `chrome-debug.sh` 旧参数 |
+| ③ | `openPlatformEntryTab` 只按「域内已有标签」幂等；新标签注册窗口期内 URL 还是 `about:blank`，命中不了（`ensureAppListTab` 早有 pending 机制，入口页漏了） | `launch.go` / `app_list.go` |
+| ④ | 启动参数无 `--window-size`；固定宽度的管理后台在默认窄窗口下横向溢出，左侧主导航被挤出视口 ⇒ 样式错乱 | 截图 2（侧栏只剩半个词 + 底部横向滚动条） |
+| ⑤ | 执行过程卡住是**工具选错**：`capture` 按设计剔除 `Scope:"list"` 步骤、要求已停在 `#/aiHelper/detail?aibotid=`，只有 `setup` 会跑「navigate 列表页 → 点 `.d2c_bot_name` → 等 URL」进详情；`dom_verified=false` 又让 Agent 只做只读定位、不敢点，于是反复重试 | 截图 3 执行日志、`portal.go:336-350` |
+
+- **修复（静态分析 + 单测）**：`launch.go` 新增 `platformEntryURL`（有 `AppListURL` 的平台 start 直接进管理后台，不动 `Portal.URL` 数据面）、`chromeLaunchArgs`（统一启动参数，补 3 个 GPU flag + `--window-size=1440,900`）、`entryPendingTab`（pending ID 幂等 + 优先激活列表/详情标签而非官网营销页）、`openURLWithSystem` 同 URL 5 分钟节流；`scripts/chrome-debug.sh` 同步参数并支持 `CHROME_EXTRA_FLAGS`。新增 5 个回归用例。
+
+**第十八轮真机验证**（2026-11-12 18:35–18:52，调试 Chrome 从零拉起；全程不代做登录、不创建、不提交、不回显凭据值）：
+
+| 验证项 | 真机结果 |
+|---|---|
+| 新参数能否自启动 | `StartPlatform(wecom)` → `chrome=started`，CDP `/json/version` 返回 `Chrome/158.0.8127.18`。本机默认参数原本 `exit 133` ⇒ **GPU flag 修复生效** |
+| 窗口尺寸 / 样式 | CDP `Browser.getWindowForTarget` → `{left:0,top:33,width:1440,height:900,windowState:"normal"}`；页面 `innerWidth=1280`、`scrollWidth=1280` ⇒ **无横向溢出**（图2 的裁切不再出现） |
+| start 落点 | 首次 `url=https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?...`；官网营销页标签数 **0** |
+| 标签幂等 | 连续 3 次 `start`，page 标签 `2 → 2 → 2`；人为塞一个官网营销页标签后再 `start`，仍 `3 → 3` |
+| 后台页面真渲染 | 详情页只读探测 `hasBotIdLabel=true / hasSecretLabel=true / copyIcons=2 / bodyLen=565`，`sw=1280 == iw=1280` ⇒ 样式结论不是在空白页上测的 |
+| 只读门 | `setup(wecom, confirmed=false)` → `need_confirmation`、`open_app=already_open`、走 B 路径「个人测试」不新建；plan 无「创建应用」 |
+| `Watch(wecom)` | `chrome_ready=true / login=logged_in / in_app_detail=true` ⇒ 图3「capture 停在列表页」前置条件已满足 |
+| `Capture(wecom)` 端到端 | 两次幂等 `phase=done`、`collected=[WECOM_BOT_ID, WECOM_BOT_SECRET]`、真连校验通过、`.env` 落库（35 / 43 位、无掩码）、11.44s（< 25s 上限） |
+| shell 脚本幂等 | 9222 已运行时 `./scripts/chrome-debug.sh` 返回「无需重复启动」，未拉起第二个实例 |
+
+**真机额外发现并修复的两个缺陷**（静态分析看不到，只有跑起来才暴露）：
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| ⑥ | 人为留官网营销页标签时 `start` 报 `ready_to_capture`，前台却仍是营销页（详情页 `vis=hidden`） | 提前返回分支只置 `PageOpened=true` 就 return，**没激活标签** | `launch.go` 新增 `activatePlatformTab`（详情页 > 列表页 > 域内标签，只读激活、绝不新开）；新增回归用例 `TestActivatePlatformTabPrefersDetailOverMarketing` |
+| ⑦ | `Capture(wecom)` 两次 `capture_failed / context deadline exceeded`，恰好 25.00s | 分步 CDP 诊断（堆栈留证 `/tmp/hub-step-probe.log`）：后台标签 `requestAnimationFrame` 被 Chrome 暂停，rod `Element.Click → WaitInteractable → ScrollIntoView → WaitStableRAF` 永久等不到回调，耗光会话 ctx。与选择器、坐标、页面渲染均无关 | `browser.go` 的 `copyToCred` 改为读元素几何后用 `Mouse.MoveTo/Click` 派发 CDP 原生鼠标事件（复用 `copyInFrame` 已验证模式），`runOp` 前加 `ensurePageVisible` 尽量激活标签。**修复后在所有标签 `vis=hidden` 的极端状态下仍 `phase=done`** |
+
+- **回归**：`gofmt` 空 / `go build ./...` / `go vet ./...` / 全量 6 包测试绿 / `bash -n scripts/chrome-debug.sh` 通过；临时探针 `zz_livecheck_test.go` 跑完即删、未进版本库；`bin/hub` 重建（18:52）。
+- **诚实边界**：① stdio 宿主不会自动重载二进制，需在连接器页面禁用/启用 `mcp-hub`（或新开会话）后修改才在运行时生效；② 探针的 `reload` 是 no-op，`Capture` 返回的「已完成热重载」在探针里不成立，`.env` 要等连接器重拉才生效；③ 探测前仓库根 `.env` 已不存在，本轮 `Capture` 重新落库（权限 600），未回显任何凭据值；④ **同类隐患未扩张修复**：`runOp` 的 `click` / `clickInRow` / `hover` 仍走 rod `Element.Click/MustHover`，窗口最小化时理论上仍可能挂 `WaitStableRAF`——本轮刻意不动它们，因为改动会波及第十七轮已真机验证的钉钉/飞书链路，且无法在不触发不可逆动作的前提下安全回归；⑤ 未创建机器人、未改权限、未点发布、未重试提交。
+
+**第二十一轮：按用户确认代建 `mcp-hub` 并端到端校准 `create-bot`**（2026-11-12 20:07–20:45，未提交）：用户确认「用默认名 mcp-hub 按照你的建议改」。本轮**真实创建了 1 个 API 模式智能机器人**，新凭据已写入 `.env`（35 / 43 位，不回显值）；`bin/hub` 重建 20:43。
+
+| # | 真机暴露的事实 | 修复 |
+|---|---|---|
+| ① | `setupPlan` 给企微套 `app_console` 通用模板，确认清单出现「创建版本 1.0.0 并申请发布」；publish 阶段的 probe 还会点未校准的「发布/启用」按钮 | `stages.go` 的 wecom publish 改为纯只读状态核对 + `ApplyNote` → `not_required`，`PlanLine` 明确「无版本概念，不创建版本、不点发布」；新增 1 个回归用例 |
+| ② | 执行器绑到后台首页 `#/index` 而非机器人列表页：`appListBase` 只比 host+path，而 `#/index`、`#/aiHelper/list`、`#/aiHelper/detail` 共用 `/wework_admin/frame` | `app_list.go` 新增 `appListHashPrefix`，声明了 `AppListURL` 的平台再比 hash 路径；飞书无声明，行为不变 |
+| ③ | CDP `/json/new` 打开的列表页渲染成**英文 UI**（`Intelligent Bot Create / Created by company / Create Bot`），中文 markers 一条不中 → `listVerified=false` → 硬闸门永远拒绝代建 | `Portal.AppListMarkersAlt` 备用语言组（任一组全中即已渲染）+ `markersRendered` 空白归一化（SPA 的换行会把 marker 拆开）；首页只命中单个词不算通过 |
+| ④ | 点「创建机器人」进入的是**独立 SPA 页** `#/aiHelper/create`，不是弹窗；旧 Ops 第 1 步在首页等「创建机器人」按钮必然 `selector_miss` | `create-bot` 脚本升级 `wecom@2026-11-12-create-api-mode`：`navigate` 复用/打开创建页 → 等名称框 → 切模式 → 填名称 → 填简介 → 生成 Secret → 保存 |
+| ⑤ | 默认「普通模式」用的是企微自带模型；只有 **API 模式**才有 Bot ID / Secret 长连接凭据。模式 radio 的 `label` 自身无文本，按文本筛不到 | `clickAt` 支持 `Index`（与既有 `pick` 一致的 0-based 语义），真机 DOM 第 2 个 label 即 API 模式；radio 重复点击幂等 |
+| ⑥ | 创建页常是 `hidden` 标签：rod 的 `MustClick/MustInput` 会挂 `WaitStableRAF`；即便用坐标点击且 `elementFromPoint` 命中按钮内部，hidden 状态下 React `onClick` 也不触发 | 新增 `clickAt`（读几何 + `scrollIntoView` + CDP 原生鼠标事件 + 点击前 `Activate`）、`fillJS`（原生 setter + input/change 事件 + 读回校验）两种 Op；只用于企微创建链路，不碰已验证的飞书/钉钉 `click` 链路 |
+| ⑦ | 保存静默无效：toast「请输入简介」（简介必填）、补上后 toast「**生成Secret后方可保存机器人**」（API 模式须先点 `span.sdk-get-secret`） | Ops 补 `fillJS` 填简介 + `clickAt` 生成 Secret；新增 `Op.Optional`，Secret 生成后按钮消失时静默跳过，保证整套 Ops 幂等 |
+| ⑧ | 保存其实**成功**了，但详情页跳转超过 15s；`waitForNewDetail` 超时误报 `create_failed`，`next` 还让用户「手动完成创建」——**会诱导重复提交不可撤销的创建表单** | `createAppURLWaitMax` 15s→30s；新增 `createdAppInList` 兜底（列表页确认新应用已出现 → `openAppForSetup` 进详情）；失败文案区分「已创建但没进详情」与「确实没创建」，两种都禁止重复提交 |
+
+**验收**：`Watch` 停在 `#/aiHelper/detail?aibotid=…&tab=manage`；刷新列表页见 `Created by company mcp-hub API 模式`；`Capture(wecom)` 两次 `phase=done`（11.48s / 11.46s），`collected=[WECOM_BOT_ID, WECOM_BOT_SECRET]`，`.env` 落库 35 / 43 位；幂等门真机验证 `CreateApp(confirmed=true)` 返回 `already_in_detail`、`created_url` 为空、`Capture` 仍 `done`，**没有第二次创建**。`gofmt` 空 / `go build` / `go vet` / 全量 6 包测试 / `bash -n` 全绿；临时探针加了 `HUB_LIVE_PROBE=1` 守卫（防止 `go test ./...` 误触发有副作用的创建），跑完即删、未入库。
+
+**诚实边界**：① 探针的 `reload` 是 no-op，「已完成热重载」在探针里不成立，`.env` 要等连接器重拉才生效；② stdio 宿主不会自动重载 `bin/hub` 与 `config.json`/`.env`/`server.js`，需**禁用/启用 `mcp-hub` 连接器**或新开会话；③ 新机器人尚未被拉进目标群（人工步骤），`im.send_text` 仍需显式 `target`；④ 事件桥 `.env` 仍无 `HUB_EVENT_SECRET`，上一轮修的适配器默认回落与白名单也需宿主重载才生效；`chats` 表里的旧 chatid 属已删除的旧机器人，**不要复用**；⑤ 未改权限、未点发布、未回显任何凭据值、未提交；`dom_verified` 维持 `false`（权限阶段未校准）。
 
 **端到端真机执行**（2026-11-11 第六轮，`setup(platform="dingtalk", confirmed=true)`）：留证 `/tmp/setup-true-20261111.json`，结果 `phase=partial`，**与预期不同**，如实记录：
 

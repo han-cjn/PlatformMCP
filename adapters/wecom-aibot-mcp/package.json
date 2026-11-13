@@ -1,7 +1,10 @@
 {
   "name": "wecom-aibot-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
+  "scripts": {
+    "test": "node --test *.test.js"
+  },
   "description": "企微智能机器人(Bot ID + Secret)的本地 MCP 适配器:长连接收发一体 + 可靠事件上报",
   "type": "module",
   "dependencies": {

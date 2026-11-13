@@ -68,16 +68,22 @@ func (r *RecordRule) Handle(ctx context.Context, evt Event) error {
 	})
 	if err != nil {
 		slog.Error("写 Bitable 失败", "err", err, "platform", evt.Platform)
-		r.ack(ctx, evt.Platform, chatID, fmt.Sprintf("❌ 记录失败:%v", err))
+		r.ack(ctx, evt.Platform, botName(evt), chatID, fmt.Sprintf("❌ 记录失败:%v", err))
 		return nil // 已回执,错误不外抛阻断总线
 	}
 	slog.Info("已写入 Bitable", "platform", evt.Platform, "sender", sender, "resp", resp)
-	r.ack(ctx, evt.Platform, chatID, fmt.Sprintf("✅ 已记录到多维表格(来源:%s)", evt.Platform))
+	r.ack(ctx, evt.Platform, botName(evt), chatID, fmt.Sprintf("✅ 已记录到多维表格(来源:%s)", evt.Platform))
 	return nil
 }
 
-func (r *RecordRule) ack(ctx context.Context, platform, chatID, text string) {
-	if _, err := semantic.SendText(ctx, r.Reg, r.Mgr, platform, chatID, text); err != nil {
+func (r *RecordRule) ack(ctx context.Context, platform, botName, chatID, text string) {
+	if _, err := semantic.SendTextWithBot(ctx, r.Reg, r.Mgr, platform, botName, chatID, text); err != nil {
 		slog.Error("回执发送失败", "platform", platform, "err", err)
 	}
+}
+
+// botName 保留来源机器人身份,防止多机器人共用 chatid 时回执串号。
+func botName(evt Event) string {
+	name, _ := evt.Payload["bot_name"].(string)
+	return name
 }

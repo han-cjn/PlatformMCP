@@ -20,7 +20,7 @@ import (
 type Event struct {
 	Platform string         `json:"platform"`  // feishu / dingtalk / wecom / tencent-docs
 	Type     string         `json:"type"`      // im.message / im.message.unsupported / doc.updated / ...
-	SourceID string         `json:"source_id"` // 平台侧业务唯一 ID(去重键):飞书 event_id、钉钉 msgId、企微 msgid
+	SourceID string         `json:"source_id"` // 去重键:飞书 event_id、钉钉 msgId、企微 bot_name:msgid
 	Payload  map[string]any `json:"payload"`   // 归一化后的载荷:chat_id / sender / text / msg_type ...
 	Received time.Time      `json:"received"`
 	Attempts int            `json:"attempts"`
@@ -92,7 +92,8 @@ func (d *Dispatcher) Publish(e Event) error {
 // noteChat 沉淀事件来源会话(P0-3)。
 func (d *Dispatcher) noteChat(e Event) {
 	chatID, _ := e.Payload["chat_id"].(string)
-	d.st.NoteChat(e.Platform, chatID, "")
+	name, _ := e.Payload["bot_name"].(string)
+	d.st.NoteChat(e.Platform, chatID, name)
 }
 
 // Start 启动调度循环与 worker 池。

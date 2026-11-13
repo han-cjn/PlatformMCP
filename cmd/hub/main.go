@@ -97,7 +97,7 @@ func main() {
 	st.PruneDedup()
 	st.RecoverProcessing() // 回收上次崩溃残留的 processing 事件
 
-	mgr := adapter.NewManager(ctx, cfg.Servers, hr)
+	mgr := adapter.NewManagerWithConfig(ctx, cfg, hr)
 	defer mgr.Close()
 	registry := semantic.NewRegistry(cfg.Routes)
 
@@ -209,9 +209,10 @@ func main() {
 	hub.AddTool(mcp.NewTool("hub.onboard.capture",
 		mcp.WithDescription("自动完成接入收尾:从浏览器应用详情页读取 App ID/Secret → 格式校验 → 真连校验 → 写入 .env → 热重载挂载。全程无需终端、无需用户执行任何命令,替代 `go run ... -onboard <平台> -onboard-browser`。四个平台均定义了凭据动作:应用控制台类从应用详情页读 App ID/Secret 或 AppKey/Secret,腾讯文档从授权页读取 MCP Token(整页文本正则抽取,零 DOM 选择器依赖)。前置条件是用户已登录并停在凭据页;未满足时返回 waiting_login / waiting_app_detail 等 phase(不是错误),按 next 提示继续轮询或转述给用户"),
 		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单")),
+		mcp.WithString("app_name", mcp.Description("企微机器人名称;多个机器人时用户必须明确选择,不得默认选第一项")),
 	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		platform := req.GetString("platform", "")
-		res, err := onboard.Capture(platform, reloadCreds(platform))
+		res, err := onboard.CaptureNamed(platform, req.GetString("app_name", ""), reloadCreds(platform))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -225,6 +226,7 @@ func main() {
 		mcp.WithDescription("零浏览器依赖的通用接入收尾:把用户从平台后台复制的凭据交给 Hub,按平台定义做格式校验 → 真连校验 → 写入 .env → 热重载挂载,四个平台全部通用。values 的键名见 hub.onboard.status 返回的 platforms[].credential_fields,或本工具返回 phase=incomplete 时的 required。真连校验不通过一律不写盘;不要在回复里回显任何凭据值。当 hub.onboard.setup / capture 返回 unsupported 或 selector_miss 时,改用本工具收集凭据即可完成接入,全程无需终端命令"),
 		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单")),
 		mcp.WithObject("values", mcp.Required(), mcp.Description("凭据键值对,键为该平台 credential_fields 里的 env_key,值为用户复制的原始凭据字符串")),
+		mcp.WithString("app_name", mcp.Description("企微机器人名称;命名接入写入 config.json 的 wecom.bots,不覆盖其他机器人")),
 	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		platform := req.GetString("platform", "")
 		values := map[string]string{}
@@ -236,7 +238,7 @@ func main() {
 			}
 		}
 		res, err := onboard.SetCredentials(platform, values, onboard.CredOptions{
-			Reload: reloadCreds(platform),
+			Reload: reloadCreds(platform), BotName: req.GetString("app_name", ""),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -269,7 +271,7 @@ func main() {
 	hub.AddTool(mcp.NewTool("hub.onboard.setup",
 		mcp.WithDescription("端到端完成平台接入:自动打开或创建应用详情页、抓取 App ID/Secret 写入 .env 并热重载、用只读 API 探针验证权限(已可用则跳过 UI 开通)、创建版本并申请发布。用户只需在浏览器里登录并确认一次动作清单,无需手动点击应用、无需去终端执行命令。confirmed=false 只返回 plan,不产生任何变更;confirmed=true 后各阶段独立执行、独立返回状态(api_verified=API 探针通过并跳过 UI、already_done=平台侧原本已完成、skipped=未能自动确认且未做任何变更、selector_miss=需按 candidates 校准),单阶段失败不阻断后续阶段。perm_probe 明确区分已验证与未验证的 scope,不要把 api_verified 当成三个 scope 全部已开通。candidates 带元素标签/role,失败时调 hub.onboard.inspect 校准,不要重复调用提交。四个平台均支持:飞书/钉钉/企业微信走「创建 → 抓凭据 → 开权限 → 发布」,腾讯文档授权页即凭据页、无需创建/权限/发布;status 的 dom_verified=false 表示该平台 Ops 未在真实后台校准,selector_miss 时降级 set_credentials。登录与管理员审批仍需人工"),
 		mcp.WithString("platform", mcp.Required(), mcp.Description("平台 id,可选值见 hub.onboard.status 返回的 platforms 全量清单;配置与发布动作按平台声明式提供")),
-		mcp.WithString("app_name", mcp.Description("应用名称,默认 mcp-hub;仅列表为空需要创建时使用")),
+		mcp.WithString("app_name", mcp.Description("应用/机器人名称。企微多个机器人时必须由用户明确选择;仅列表为空创建时默认 mcp-hub")),
 		mcp.WithBoolean("confirmed", mcp.Description("用户是否已通过选择框明确同意动作清单。true 才会创建应用/开通权限/提交版本,false 时只返回 plan")),
 	), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		platform := req.GetString("platform", "")
@@ -383,8 +385,15 @@ func main() {
 		slog.Error("钉钉凭据缺失(DINGTALK_Client_ID/DINGTALK_Client_Secret),长连接降级")
 	}
 
-	// 企微凭据体检(长连接在适配器子进程内,Hub 侧通过事件到达率观测)
-	hr.SetCredentials("wecom", os.Getenv("WECOM_BOT_ID") != "" && os.Getenv("WECOM_BOT_SECRET") != "")
+	// 企微凭据体检:多机器人逐名注册;长连接由适配器内各 WSClient 维护。
+	wecomConfigured := os.Getenv("WECOM_BOT_ID") != "" && os.Getenv("WECOM_BOT_SECRET") != ""
+	if bots := cfg.WeComBots(); len(bots) > 0 {
+		wecomConfigured = true
+		for _, bot := range bots {
+			hr.SetCredentials("wecom/"+bot.Name, true)
+		}
+	}
+	hr.SetCredentials("wecom", wecomConfigured)
 	hr.SetCredentials("tencent-docs", os.Getenv("TENCENT_DOCS_TOKEN") != "")
 
 	// 场景 A 规则:#记录 → 飞书 Bitable → 回执
@@ -410,6 +419,7 @@ func main() {
 			Mgr: mgr, Reg: registry,
 			AppToken: appToken, TableID: os.Getenv("BITABLE_TABLE_ID"),
 			CreatedField: getenvDefault(cfg.Report.CreatedField, "创建时间"),
+			BotName:      cfg.Report.BotName,
 		}, cfg.Report, cfg.PushTargets)
 
 		// 手动触发入口:元工具 hub.report.run(可选 date 参数,默认今天)
@@ -434,6 +444,10 @@ func main() {
 	}
 
 	// P2-2:不支持的消息类型给明确回执,不静默
+	botName := func(e event.Event) string {
+		name, _ := e.Payload["bot_name"].(string)
+		return name
+	}
 	dispatcher.Subscribe(func(ctx context.Context, e event.Event) error {
 		if e.Type != "im.message.unsupported" {
 			return nil
@@ -443,7 +457,7 @@ func main() {
 		if chatID == "" {
 			return nil
 		}
-		_, err := semantic.SendText(ctx, registry, mgr, e.Platform, chatID,
+		_, err := semantic.SendTextWithBot(ctx, registry, mgr, e.Platform, botName(e), chatID,
 			fmt.Sprintf("⚠️ 暂不支持 %s 类型消息,请发送文本", msgType))
 		return err
 	})
@@ -688,6 +702,16 @@ func capToolHandler(ctx context.Context, cap *semantic.Capability, mgr *adapter.
 				domain[name] = v
 			}
 		}
+		if cap.Name == "im.send_text" && platform == "wecom" {
+			// 歧义必须在真正调用前返回候选,Agent 据此追问用户;不得自动选第一个。
+			if bots := cfg.WeComBots(); len(bots) > 1 && strings.TrimSpace(req.GetString("bot_name", "")) == "" {
+				out, _ := json.Marshal(map[string]any{
+					"phase": "need_bot_selection", "platform": "wecom", "bots": bots,
+					"next": "请询问用户使用哪个企业微信机器人,并带 bot_name 重试;本次未发送消息",
+				})
+				return mcp.NewToolResultError(string(out)), nil
+			}
+		}
 
 		res, err := semantic.Invoke(callCtx, semantic.BuiltinCatalog(), mgr, cap.Name,
 			platform, domain, cfg.DefaultPlatformOrder)
@@ -718,7 +742,7 @@ func reloadPlatform(ctx context.Context, platform, configPath string, mgr *adapt
 	}
 	for _, sc := range fresh.Servers {
 		if sc.Name == platform {
-			return mgr.Reload(ctx, sc)
+			return mgr.ReloadWithConfig(ctx, sc, fresh)
 		}
 	}
 	return fmt.Errorf("config.json 中找不到平台 %s 的 servers 定义", platform)

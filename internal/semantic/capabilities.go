@@ -23,11 +23,16 @@ var ImSendText = &Capability{
 	Name:  "im.send_text",
 	Title: "发送消息",
 	Description: "向指定会话发送消息。format=plain 为纯文本;format=markdown 按 Markdown 渲染" +
-		"(飞书自动转换为富文本 post,钉钉/企微原生支持)。客户端只需 target + text",
+		"(飞书自动转换为富文本 post,钉钉/企微原生支持)。客户端只需 target + text;企微多个机器人时必须由用户明确选择 bot_name",
 	Schema: map[string]FieldSpec{
 		"target": {
 			Type: "string",
 			Desc: commonTargetDesc,
+		},
+		"bot_name": {
+			Type:    "string",
+			Desc:    "企微机器人名称。仅企微配置多个机器人时需要;必须让用户明确选择,不得自动选第一个或猜测。未选择时返回候选与 need_bot_selection,由 Agent 追问用户",
+			Default: "",
 		},
 		"text": {
 			Type: "string",
@@ -75,8 +80,9 @@ var ImSendText = &Capability{
 		"wecom": {
 			Tool: "wecom_send_text",
 			Args: map[string]string{
-				"chatid":  "$.target",
-				"content": "$.text",
+				"chatid":   "$.target",
+				"content":  "$.text",
+				"bot_name": "$.bot_name",
 			},
 		},
 		// 腾讯文档没有 IM 能力:显式声明,给出可读原因而非"不支持平台"的模糊报错

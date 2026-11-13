@@ -31,11 +31,18 @@ func TestPlatformStagesPerPlatform(t *testing.T) {
 			if s.ApplyNote != "" && len(apply) > 0 {
 				t.Fatalf("%s/%s 声明了 not_required 却仍保留会误提交的 apply Ops", id, s.ID)
 			}
-			if probe[0].Kind != "waitVisible" || probe[0].Target != menuCandidateSelector || probe[0].Match == "" {
-				t.Fatalf("%s/%s 的 probe 首步应为统一选择器的带文本等待: %+v", id, s.ID, probe[0])
+			if probe[0].Kind != "waitVisible" {
+				t.Fatalf("%s/%s 的 probe 首步应为 waitVisible: %+v", id, s.ID, probe[0])
 			}
-			if _, err := regexp.Compile(probe[0].Match); err != nil {
-				t.Fatalf("%s/%s 菜单正则非法: %v", id, s.ID, err)
+			// 声明了 ApplyNote 的阶段是「纯只读整页文本核对」,不需要(也不该)
+			// 依赖未校准的菜单选择器:首步等 body 即可,待匹配文本交给 Done 判定。
+			if s.ApplyNote == "" {
+				if probe[0].Target != menuCandidateSelector || probe[0].Match == "" {
+					t.Fatalf("%s/%s 的 probe 首步应为统一选择器的带文本等待: %+v", id, s.ID, probe[0])
+				}
+				if _, err := regexp.Compile(probe[0].Match); err != nil {
+					t.Fatalf("%s/%s 菜单正则非法: %v", id, s.ID, err)
+				}
 			}
 			hasReadPage := false
 			for _, op := range probe {
@@ -104,6 +111,19 @@ func TestSetupPlanPerPlatform(t *testing.T) {
 	if !strings.Contains(wecom, "收发消息") || !strings.Contains(wecom, "Bot ID") {
 		t.Fatalf("企微 plan 未按平台声明: %s", wecom)
 	}
+	// 2026-11-12 真机创建 mcp-hub:企微智能机器人没有版本/申请发布概念,
+	// 通用 app_console 模板曾让确认清单出现「创建版本 1.0.0 并申请发布」,
+	// 会诱导 Agent 去点不存在(且不可逆)的发布按钮。
+	for _, bad := range []string{"创建版本 1.0.0 并申请发布", "核对版本发布状态", "申请发布"} {
+		if strings.Contains(wecom, bad) {
+			t.Fatalf("企微 plan 仍含不适用的版本发布文案 %q: %s", bad, wecom)
+		}
+	}
+	for _, want := range []string{"核对机器人启用状态", "无版本概念", "不点发布"} {
+		if !strings.Contains(wecom, want) {
+			t.Fatalf("企微 plan 缺只读启用状态说明 %q: %s", want, wecom)
+		}
+	}
 	tencent := strings.Join(setupPlan(Portals["tencent-docs"], "", false), "|")
 	for _, bad := range []string{"创建应用", "开通权限", "版本"} {
 		if strings.Contains(tencent, bad) {
@@ -112,6 +132,38 @@ func TestSetupPlanPerPlatform(t *testing.T) {
 	}
 	if !strings.Contains(tencent, "MCP Token") || !strings.Contains(tencent, "凭据授权页") {
 		t.Fatalf("腾讯文档 plan 应说明授权页读 Token: %s", tencent)
+	}
+}
+
+// TestWecomPublishStageNeverClicksIrreversibleButtons 锁死 2026-11-12 的修复:
+// 企微后台 DOM 未端到端校准,发布/启用阶段只能只读核对,不得保留任何 apply Ops。
+func TestWecomPublishStageNeverClicksIrreversibleButtons(t *testing.T) {
+	var pub setupStage
+	found := false
+	for _, s := range platformStages(Portals["wecom"]) {
+		if s.ID == "publish" {
+			pub, found = s, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("企微 publish 阶段缺失;确认清单与阶段声明需同步调整")
+	}
+	if pub.ApplyNote == "" || pub.PlanLine == "" {
+		t.Fatal("企微 publish 必须同时声明 PlanLine(确认清单)与 ApplyNote(not_required 降级)")
+	}
+	if apply := opsForScope(pub.Action, "apply"); len(apply) > 0 {
+		t.Fatalf("企微 publish 仍保留会误提交的 apply Ops: %+v", apply)
+	}
+	for _, op := range opsForScope(pub.Action, "probe") {
+		switch op.Kind {
+		case "waitVisible", "readPage":
+		default:
+			t.Fatalf("企微 publish 的 probe 出现非只读操作 %s", op.Kind)
+		}
+	}
+	if strings.Contains(pub.PlanLine, "申请发布") || strings.Contains(pub.PlanLine, "1.0.0") {
+		t.Fatalf("企微 publish 的 PlanLine 仍含版本发布文案: %q", pub.PlanLine)
 	}
 }
 

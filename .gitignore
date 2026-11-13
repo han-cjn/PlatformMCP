@@ -11,6 +11,7 @@ node_modules/
 # 注意:必须带前导斜杠锚定根目录——裸写 hub 会误伤 cmd/hub/ 源码目录
 /hub
 /bin/
+/wecom_multibot_verify
 *.exe
 
 # 日志与临时文件

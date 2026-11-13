@@ -13,6 +13,7 @@ type CaptureResult struct {
 	ChromeReady bool     `json:"chrome_ready"`
 	LoginState  string   `json:"login_state"`
 	Collected   []string `json:"collected"`
+	BotName     string   `json:"bot_name,omitempty"`
 	Message     string   `json:"message,omitempty"`
 	Next        string   `json:"next"`
 }
@@ -25,6 +26,11 @@ type CaptureResult struct {
 //
 // 合规边界:只读取页面上已展示的凭据、点击「复制」图标读回明文,绝不代做登录或表单提交。
 func Capture(platform string, reload func(map[string]string) error) (*CaptureResult, error) {
+	return CaptureNamed(platform, "", reload)
+}
+
+// CaptureNamed 要求企微多机器人必须显式给 botName;单机器人兼容旧 Capture。
+func CaptureNamed(platform, botName string, reload func(map[string]string) error) (*CaptureResult, error) {
 	p, ok := FindPortal(platform)
 	if !ok {
 		return nil, fmt.Errorf("未知平台 %q,可选: %s", platform, strings.Join(PlatformOrder(), " / "))
@@ -51,11 +57,36 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 		res.Phase = "page_loading"
 		res.Next = "浏览器页面尚未稳定(未识别到登录页或开放平台页);继续轮询 hub.onboard.watch,状态明确后再重试 hub.onboard.capture"
 		return res, nil
-	case !w.InAppDetail:
+	case platform == "wecom" && botName == "" && w.LoginState != "logged_in":
+		// 企微登录过期时旧详情 DOM 可能仍可读,绝不能拿它冒充已核验的唯一机器人。
+		res.Phase = "need_bot_selection"
+		res.Next = "企微登录态过期或无法确认,不能仅凭残留详情页自动选择机器人;请重新登录并从列表明确选择后带 app_name 重试;本次未读取任何凭据"
+		return res, nil
+	case !w.InAppDetail && !(platform == "wecom" && botName != ""):
 		res.Phase = "waiting_app_detail"
 		res.Next = "调用 hub.onboard.setup 可自动打开/创建应用详情页并完成后续配置;" +
 			"若只需抓凭据,请让用户在浏览器里打开「凭证与基础信息」页(URL 形如 " + p.URL + "/<appId>/...)后重试 hub.onboard.capture"
 		return res, nil
+	case !w.InAppDetail && platform == "wecom" && botName != "":
+		// Capture 也可独立调用:从列表进入用户明确选择的机器人,不靠残留详情页。
+		detail, step := openAppForSetup(p, w, botName)
+		if step.Status != "done" && step.Status != "already_open" {
+			res.Phase = step.Status
+			res.Message = step.Message
+			res.Next = "请从候选机器人中明确选择;本次未读取任何凭据"
+			return res, nil
+		}
+		w.DetailURL = detail
+	}
+
+	if platform == "wecom" {
+		_, identity := wecomOpenDetail(p, w.DetailURL, botName)
+		if identity.Status != "already_open" {
+			res.Phase = identity.Status
+			res.Message = identity.Message
+			res.Next = "多机器人时必须由用户明确选择;本次未读取任何凭据"
+			return res, nil
+		}
 	}
 
 	act := credAction(p)
@@ -78,19 +109,26 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 	// 把执行器切到应用详情页标签。Close() 只关 NewBrowserExecutor 自己开的
 	// about:blank,不会碰用户的页面。
 	located := false
-	err = bx.safe(func() {
-		for _, pg := range bx.browser.MustPages() {
-			info, e := pg.Info()
-			if e != nil || info == nil {
-				continue
-			}
-			if portalDetailMatch(p, info.URL) {
-				bx.page = pg
-				located = true
-				return
-			}
+	if platform == "wecom" {
+		if page := findWeComDetailPage(bx, w.DetailURL); page != nil {
+			bx.page = page
+			located = true
 		}
-	})
+	} else {
+		err = bx.safe(func() {
+			for _, pg := range bx.browser.MustPages() {
+				info, e := pg.Info()
+				if e != nil || info == nil {
+					continue
+				}
+				if portalDetailMatch(p, info.URL) {
+					bx.page = pg
+					located = true
+					return
+				}
+			}
+		})
+	}
 	if err != nil || !located {
 		res.Phase = "waiting_app_detail"
 		res.Message = "未能在调试 Chrome 中定位到应用详情页标签"
@@ -113,7 +151,7 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 	// 缺值/格式校验 → 真连校验 → 写 .env → 热重载,与 set_credentials 共用
 	// 同一份收尾逻辑,避免两条接入路径的校验规则漂移。
 	collected, ce := commitCredentials(platform, env, CredOptions{
-		EnvPath: ".env", Validate: p.Validate, Reload: reload,
+		EnvPath: ".env", ConfigPath: "config.json", Validate: p.Validate, Reload: reload, BotName: botName,
 	})
 	if ce != nil {
 		res.Phase = capturePhase(ce.Phase)
@@ -132,8 +170,12 @@ func Capture(platform string, reload func(map[string]string) error) (*CaptureRes
 		return res, nil
 	}
 	res.Collected = collected
+	res.BotName = botName
 	res.Phase = "done"
-	res.Next = "凭据已写入 .env 并完成热重载;调用 hub.onboard.setup 可自动完成权限开通与版本发布,之后即可调用 table.query 等能力"
+	res.Next = "凭据已写入并完成本次接入回调;调用 hub.health 确认宿主已挂载,之后可调用 table.query 等能力"
+	if platform == "wecom" && botName != "" {
+		res.Next = "机器人「" + botName + "」的凭据已写入 .env,config.json 的 wecom.bots 仅保存变量引用;其他机器人配置未修改"
+	}
 	return res, nil
 }
 
@@ -192,9 +234,9 @@ func captureNext(phase string, platform ...string) string {
 	case "verify_failed":
 		return "凭据被平台拒绝或平台不可达,未写入 .env;核对后重试 hub.onboard.capture,或改用 hub.onboard.set_credentials"
 	case "write_failed":
-		return "写 .env 失败,检查工作目录写权限后重试 hub.onboard.capture"
+		return "写入或校验本地凭据配置失败;请按 message 修正文件权限、既有配置引用或环境变量后重试"
 	case "reload_failed":
-		return "凭据已写入 .env,但热重载失败;在连接器页面禁用/启用 mcp-hub 即可生效"
+		return "凭据已写入,但本次接入回调失败;在连接器页面禁用/启用 mcp-hub 后重试"
 	default:
 		return "按 message 修正后重试,或改用 hub.onboard.set_credentials"
 	}

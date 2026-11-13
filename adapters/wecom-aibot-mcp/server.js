@@ -1,36 +1,25 @@
 #!/usr/bin/env node
 /**
- * 企微智能机器人 MCP 适配器(本地 stdio MCP Server)
- * 基于官方 @wecom/aibot-node-sdk,把智能机器人能力包装成 MCP 工具 + 事件上报。
+ * 企微智能机器人 MCP 适配器:一个进程管理一个或多个命名机器人。
+ * 多机器人发送必须显式传 bot_name;绝不默认选择第一项。
  *
- * 工具:
- *   - wecom_send_text: 主动发送 Markdown 消息(chatid 必填;群聊会话 ID 见 Hub 的 hub.chats)
- * 事件:
- *   - 六类消息/事件帧 -> 可靠上报到 Hub /events(内存队列 + 指数退避重试,P0-2)
- *
- * 环境变量:WECOM_BOT_ID / WECOM_BOT_SECRET(必填);HUB_EVENT_URL(可选);HUB_EVENT_SECRET(可选);
- *          HUB_EVENT_RETRY_MAX(可选,默认 5)
+ * 兼容旧版 WECOM_BOT_ID / WECOM_BOT_SECRET;多机器人由 Hub 从 config.json
+ * 展开为 WECOM_BOTS=[{name,bot_id,secret}],只注入本进程,不写日志。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { WSClient } from '@wecom/aibot-node-sdk';
+import { parseBotConfigs, selectBot, eventForBot, formatSendError } from './bots.js';
 
-const botId = process.env.WECOM_BOT_ID;
-const secret = process.env.WECOM_BOT_SECRET;
-if (!botId || !secret) {
-  console.error('[wecom-aibot-mcp] 缺少 WECOM_BOT_ID / WECOM_BOT_SECRET');
-  process.exit(1);
-}
-
-const HUB_EVENT_URL = process.env.HUB_EVENT_URL || '';
+const bots = parseBotConfigs();
+const HUB_EVENT_URL = process.env.HUB_EVENT_URL ?? 'http://127.0.0.1:9780/events';
 const HUB_EVENT_SECRET = process.env.HUB_EVENT_SECRET || '';
 const RETRY_MAX = parseInt(process.env.HUB_EVENT_RETRY_MAX || '5', 10);
+console.error(`[wecom-aibot-mcp] 机器人数量: ${bots.length};事件上报: ${HUB_EVENT_URL || '(已关闭)'}`);
 
-// ---- 可靠事件上报(P0-2):内存队列 + 指数退避;达上限丢弃并打 ERROR,防止无限堆积 ----
 const queue = [];
 let flushing = false;
-
 async function flushQueue() {
   if (flushing) return;
   flushing = true;
@@ -51,71 +40,67 @@ async function flushQueue() {
         delay = Math.min(delay * 2, 30000);
       }
     }
-    if (!delivered) {
-      console.error('[wecom-aibot-mcp] ERROR 事件已达重试上限被丢弃:', JSON.stringify({ type: evt.type, source_id: evt.source_id }));
-    }
+    if (!delivered) console.error('[wecom-aibot-mcp] ERROR 事件已达重试上限被丢弃:', evt.type);
     queue.shift();
   }
   flushing = false;
 }
 
-const forwardEvent = (type) => (frame) => {
-  if (!HUB_EVENT_URL) return;
-  const body = frame?.body || {};
-  // 去重键必须用平台业务消息 ID(msgid):企微重复推送时 req_id 会变、msgid 不变
-  const evt = {
-    platform: 'wecom',
-    type: type.startsWith('message.') ? 'im.message' : type,
-    source_id: body.msgid || '',
-    payload: body,
-  };
-  queue.push(evt);
-  flushQueue();
-};
-
-// ---- 长连接(P1-4):disconnect/error 时复位 authed,等待 SDK 自动重连后再放行 ----
-let authed = false;
-const wsClient = new WSClient({ botId, secret });
-try {
-  wsClient.on('disconnected', () => {
-    authed = false;
-    console.error('[wecom-aibot-mcp] 长连接断开,等待 SDK 自动重连');
+const clients = new Map();
+for (const bot of bots) {
+  const runtime = { authed: false, client: new WSClient({ botId: bot.bot_id, secret: bot.secret }) };
+  clients.set(bot.name, runtime);
+  const ws = runtime.client;
+  try {
+    ws.on('disconnected', () => {
+      runtime.authed = false;
+      console.error(`[wecom-aibot-mcp] ${bot.name}:长连接断开,等待 SDK 自动重连`);
+    });
+    ws.on('error', (err) => console.error(`[wecom-aibot-mcp] ${bot.name}:连接错误:`, err?.message || err));
+  } catch { /* 旧版 SDK 无这些事件时忽略 */ }
+  ws.on('authenticated', () => {
+    runtime.authed = true;
+    console.error(`[wecom-aibot-mcp] ${bot.name}:长连接认证成功`);
   });
-  wsClient.on('error', (err) => {
-    console.error('[wecom-aibot-mcp] 连接错误:', err?.message || err);
-  });
-} catch { /* 旧版 SDK 无这些事件时忽略,重连仍由 SDK 内置 */ }
-
-wsClient.on('authenticated', () => {
-  authed = true;
-  console.error('[wecom-aibot-mcp] 长连接认证成功');
-});
-for (const t of ['message.text', 'message.image', 'message.mixed', 'event.enter_chat', 'event.template_card_event', 'message.feedback']) {
-  wsClient.on(t, forwardEvent(t));
+  for (const type of ['message.text', 'message.image', 'message.mixed', 'event.enter_chat', 'event.template_card_event', 'message.feedback']) {
+    ws.on(type, (frame) => {
+      if (!HUB_EVENT_URL) return;
+      queue.push(eventForBot(bot, type, frame));
+      flushQueue();
+    });
+  }
+  ws.connect();
 }
-wsClient.connect();
 
-const waitAuth = async () => {
+const waitAuth = async (runtime) => {
   const deadline = Date.now() + 15000;
-  while (!authed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
-  if (!authed) throw new Error('企微长连接未就绪(未认证或已断开)');
+  while (!runtime.authed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+  if (!runtime.authed) throw new Error('企微长连接未就绪(未认证或已断开)');
 };
 
-// ---- MCP Server ----
-const server = new McpServer({ name: 'wecom-aibot-mcp', version: '0.3.0' });
-
+const server = new McpServer({ name: 'wecom-aibot-mcp', version: '0.4.0' });
 server.tool(
   'wecom_send_text',
-  '企业微信智能机器人:向指定会话主动发送 Markdown 消息(chatid 可从 Hub hub.chats 枚举,或从消息帧 payload.chatid 获取)',
-  { chatid: z.string().describe('目标会话 ID(群聊/单聊)'), content: z.string().describe('Markdown 消息内容') },
-  async ({ chatid, content }) => {
+  '向指定企微会话发送 Markdown;多个机器人时必须明确 bot_name,不得自动选择',
+  {
+    chatid: z.string().describe('目标会话 ID'),
+    content: z.string().describe('Markdown 消息内容'),
+    bot_name: z.string().optional().describe('机器人名称;多个机器人时由用户明确选择'),
+  },
+  async ({ chatid, content, bot_name }) => {
+    let selected;
     try {
-      await waitAuth();
-      await wsClient.sendMessage(chatid, { msgtype: 'markdown', markdown: { content } });
-      return { content: [{ type: 'text', text: `已发送到 ${chatid}` }] };
+      // 先消歧,再做认证等待:歧义调用不得触发任何发送。
+      selected = selectBot(bots, bot_name || '');
+      const runtime = clients.get(selected.name);
+      await waitAuth(runtime);
+      await runtime.client.sendMessage(chatid, { msgtype: 'markdown', markdown: { content } });
+      return { content: [{ type: 'text', text: `已由机器人「${selected.name}」发送到 ${chatid}` }] };
     } catch (err) {
-      if (String(err?.message || '').includes('未就绪')) authed = false;
-      return { content: [{ type: 'text', text: `发送失败: ${err.message}` }], isError: true };
+      if (selected && String(err?.message || '').includes('未就绪')) clients.get(selected.name).authed = false;
+      // SDK 主动发送失败会 reject 普通错误帧,必须保留 errcode/errmsg/req_id。
+      const detail = formatSendError(err);
+      return { content: [{ type: 'text', text: `发送失败: ${detail}` }], isError: true };
     }
   },
 );

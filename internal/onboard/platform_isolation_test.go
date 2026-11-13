@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 2026-11-11 实测回归:调试 Chrome 的持久化 profile 里留着上一次飞书接入的
@@ -313,5 +314,162 @@ func TestPickPlatformPage(t *testing.T) {
 				t.Fatalf("pickPlatformPage=%d,期望 %d (urls=%v)", got, c.want, c.urls)
 			}
 		})
+	}
+}
+
+// ---- 2026-11-12 报障回归:start 连开 5 个官网标签 + 后台页面样式错乱 ----
+
+// TestPlatformEntryURLPrefersAppList 企微 Portal.URL 是官网营销页
+// (work.weixin.qq.com/#/app/workbenchEditor/index),start 必须落在实测可直达
+// 的管理后台列表页;没有 AppListURL 的平台仍保留原入口。
+func TestPlatformEntryURLPrefersAppList(t *testing.T) {
+	if got := platformEntryURL(Portals["wecom"]); got != Portals["wecom"].AppListURL {
+		t.Fatalf("企微 start 落点=%q,期望应用列表页 %q", got, Portals["wecom"].AppListURL)
+	}
+	if got := platformEntryURL(Portals["dingtalk"]); got != Portals["dingtalk"].AppListURL {
+		t.Fatalf("钉钉 start 落点=%q,期望应用列表页 %q", got, Portals["dingtalk"].AppListURL)
+	}
+	if got := platformEntryURL(Portals["feishu"]); got != Portals["feishu"].URL {
+		t.Fatalf("飞书无 AppListURL 应保留官网入口,得到 %q", got)
+	}
+}
+
+// TestOpenPlatformEntryTabReusesPendingTab 新标签刚创建、URL 仍是 about:blank
+// 时,连续两次 start 只能开一个标签(注册窗口期靠 pending ID 兜底)。
+func TestOpenPlatformEntryTabReusesPendingTab(t *testing.T) {
+	entryPendingTab.Lock()
+	delete(entryPendingTab.byPlatform, "wecom")
+	entryPendingTab.Unlock()
+	t.Cleanup(func() {
+		entryPendingTab.Lock()
+		delete(entryPendingTab.byPlatform, "wecom")
+		entryPendingTab.Unlock()
+	})
+
+	var paths []string
+	mockCDP(t, `[{"type":"page","url":"about:blank","id":"NEW-2"}]`, &paths)
+	p := Portals["wecom"]
+	if !openPlatformEntryTab(p, p.AppListURL) {
+		t.Fatal("首次应成功打开入口页")
+	}
+	paths = nil
+	if !openPlatformEntryTab(p, p.AppListURL) {
+		t.Fatal("pending 标签仍存活时应复用成功")
+	}
+	for _, path := range paths {
+		if strings.HasPrefix(path, "/json/new") {
+			t.Fatalf("pending 标签仍存活时不应再新建,请求路径: %v", paths)
+		}
+	}
+	if !hasPath(paths, "/json/activate/NEW-2") {
+		t.Fatalf("pending 标签未被激活,请求路径: %v", paths)
+	}
+}
+
+// TestOpenURLWithSystemThrottles 调试 Chrome 起不来时,轮询重试 start 不能
+// 每轮都在日常浏览器里再开一个标签。
+func TestOpenURLWithSystemThrottles(t *testing.T) {
+	oldRun := systemOpenRun
+	systemOpenGuard.Lock()
+	oldURL, oldAt := systemOpenGuard.lastURL, systemOpenGuard.lastAt
+	systemOpenGuard.lastURL, systemOpenGuard.lastAt = "", time.Time{}
+	systemOpenGuard.Unlock()
+	t.Cleanup(func() {
+		systemOpenRun = oldRun
+		systemOpenGuard.Lock()
+		systemOpenGuard.lastURL, systemOpenGuard.lastAt = oldURL, oldAt
+		systemOpenGuard.Unlock()
+	})
+
+	calls := 0
+	systemOpenRun = func(string) error { calls++; return nil }
+	const u = "https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list"
+	if !openURLWithSystem(u) || !openURLWithSystem(u) {
+		t.Fatal("同一页面重复兜底应视为已呈现")
+	}
+	if calls != 1 {
+		t.Fatalf("节流失效:同一 URL 拉起系统浏览器 %d 次,期望 1 次", calls)
+	}
+	if !openURLWithSystem(u + "&tab=manage") {
+		t.Fatal("不同 URL 不应被节流误伤")
+	}
+	if calls != 2 {
+		t.Fatalf("不同 URL 应各自打开一次,实际 %d 次", calls)
+	}
+}
+
+// TestChromeLaunchArgsHaveStableWindowAndGPUFlags 锁定启动参数:缺 GPU flag
+// 会 exit 133,缺 window-size 会让固定宽度后台横向溢出。
+func TestChromeLaunchArgsHaveStableWindowAndGPUFlags(t *testing.T) {
+	args := strings.Join(chromeLaunchArgs("/tmp/hub-test-profile"), " ")
+	for _, want := range []string{
+		"--remote-debugging-port=9222",
+		"--user-data-dir=/tmp/hub-test-profile",
+		"--no-sandbox",
+		"--disable-gpu",
+		"--disable-software-rasterizer",
+		"--window-size=1440,900",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("调试 Chrome 启动参数缺少 %q: %s", want, args)
+		}
+	}
+}
+
+// TestOpenPlatformEntryTabPrefersAdminListOverMarketingPage 用户截图场景:
+// profile 里残留多个官网营销页标签,真正要操作的是管理后台列表页。
+func TestOpenPlatformEntryTabPrefersAdminListOverMarketingPage(t *testing.T) {
+	entryPendingTab.Lock()
+	delete(entryPendingTab.byPlatform, "wecom")
+	entryPendingTab.Unlock()
+	t.Cleanup(func() {
+		entryPendingTab.Lock()
+		delete(entryPendingTab.byPlatform, "wecom")
+		entryPendingTab.Unlock()
+	})
+
+	var paths []string
+	mockCDP(t, `[
+		{"type":"page","url":"https://work.weixin.qq.com/#/app/workbenchEditor/index","id":"MKT-1"},
+		{"type":"page","url":"https://work.weixin.qq.com/wework_admin/frame#/aiHelper/list?from=manage_tools&tab=manage","id":"LIST-1"}
+	]`, &paths)
+	if !openPlatformEntryTab(Portals["wecom"], Portals["wecom"].AppListURL) {
+		t.Fatal("应命中已有的管理后台标签")
+	}
+	if !hasPath(paths, "/json/activate/LIST-1") {
+		t.Fatalf("未激活管理后台列表页,请求路径: %v", paths)
+	}
+	if hasPath(paths, "/json/activate/MKT-1") {
+		t.Fatalf("不应激活官网营销页,请求路径: %v", paths)
+	}
+	for _, path := range paths {
+		if strings.HasPrefix(path, "/json/new") {
+			t.Fatalf("已有后台标签不应新开,请求路径: %v", paths)
+		}
+	}
+}
+
+// TestActivatePlatformTabPrefersDetailOverMarketing 真机发现的残留缺陷:
+// start 走 ready_to_capture 提前返回时,前台仍是残留的官网营销页,
+// 详情页藏在后面(vis=hidden),用户以为工具没干活。
+func TestActivatePlatformTabPrefersDetailOverMarketing(t *testing.T) {
+	var paths []string
+	mockCDP(t, `[
+		{"type":"page","url":"https://work.weixin.qq.com/#/app/workbenchEditor/index","id":"MKT-1"},
+		{"type":"page","url":"`+wecomDetail+`","id":"DETAIL-1"}
+	]`, &paths)
+	if !activatePlatformTab(Portals["wecom"]) {
+		t.Fatal("应命中已有的企微详情页标签")
+	}
+	if !hasPath(paths, "/json/activate/DETAIL-1") {
+		t.Fatalf("详情页未被激活,请求路径: %v", paths)
+	}
+	if hasPath(paths, "/json/activate/MKT-1") {
+		t.Fatalf("不应激活官网营销页,请求路径: %v", paths)
+	}
+	for _, path := range paths {
+		if strings.HasPrefix(path, "/json/new") {
+			t.Fatalf("只读激活不应新开标签,请求路径: %v", paths)
+		}
 	}
 }

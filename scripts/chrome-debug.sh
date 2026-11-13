@@ -63,9 +63,23 @@ echo "  调试端口  : $PORT"
 echo "  Profile   : $PROFILE_DIR"
 echo
 
+# 2026-11-12 第十四轮真机实测 + 同日报障修复(必须与
+# internal/onboard/launch.go::chromeLaunchArgs 保持同步):
+#   --no-sandbox / --disable-gpu / --disable-software-rasterizer
+#     本机不带这组 flag 时调试 Chrome 会 exit 133 / "GPU process isn't usable",
+#     start 起不出实例就会反复走系统浏览器兜底、堆无用标签。
+#   --window-size=1440,900
+#     企微/钉钉管理后台是固定宽度布局,默认窗口过窄会横向溢出(左侧导航被裁
+#     掉半个词、底部出现横向滚动条),即用户截图里的「样式错乱」。
+# CHROME_EXTRA_FLAGS 需要词分割以透传多个 flag,此处刻意不加引号。
 exec "$CHROME" \
   --remote-debugging-port="$PORT" \
   --user-data-dir="$PROFILE_DIR" \
   --profile-directory=Default \
   --no-first-run \
-  --no-default-browser-check
+  --no-default-browser-check \
+  --no-sandbox \
+  --disable-gpu \
+  --disable-software-rasterizer \
+  --window-size=1440,900 \
+  ${CHROME_EXTRA_FLAGS:-}

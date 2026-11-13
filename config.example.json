@@ -13,7 +13,22 @@
     "timezone": "Asia/Shanghai",
     "backfill_hours": 24,
     "created_field": "创建时间",
-    "push_platforms": ["wecom"]
+    "push_platforms": ["wecom"],
+    "bot_name": "mcp-hub"
+  },
+  "wecom": {
+    "bots": [
+      {
+        "name": "mcp-hub",
+        "bot_id": "$WECOM_BOT_ID",
+        "secret": "$WECOM_BOT_SECRET"
+      },
+      {
+        "name": "测试",
+        "bot_id": "$WECOM_TEST_BOT_ID",
+        "secret": "$WECOM_TEST_BOT_SECRET"
+      }
+    ]
   },
   "servers": [
     {
@@ -46,7 +61,7 @@
       "transport": "stdio",
       "command": "node",
       "args": ["adapters/wecom-aibot-mcp/server.js"],
-      "env": ["WECOM_BOT_ID", "WECOM_BOT_SECRET", "HUB_EVENT_URL", "HUB_EVENT_SECRET"],
+      "env": ["WECOM_BOT_ID", "WECOM_BOT_SECRET", "HUB_EVENT_URL", "HUB_EVENT_SECRET", "HUB_EVENT_RETRY_MAX"],
       "env_prefixes": ["WECOM_"]
     }
   ],

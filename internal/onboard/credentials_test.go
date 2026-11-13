@@ -1,6 +1,7 @@
 package onboard
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -138,6 +139,52 @@ func TestSetCredentialsAllPlatformsDone(t *testing.T) {
 	}
 }
 
+func TestSetCredentialsNamedWeComWritesSecretsOnlyToEnv(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"wecom":{"bots":[{"name":"mcp-hub","bot_id":"$WECOM_BOT_ID","secret":"$WECOM_BOT_SECRET"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WECOM_BOT_ID", "existing-id")
+	t.Setenv("WECOM_BOT_SECRET", "existing-secret")
+	reloads := 0
+	res, err := SetCredentials("wecom", testCredValues["wecom"], CredOptions{
+		EnvPath: envPath, ConfigPath: configPath, SkipSetEnv: true, Validate: okValidate,
+		BotName: "测试", Reload: func(map[string]string) error { reloads++; return nil },
+	})
+	if err != nil || res.Phase != "done" {
+		t.Fatalf("命名机器人接入应完成: %+v, %v", res, err)
+	}
+	envRaw, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(envRaw), "="+testCredValues["wecom"]["WECOM_BOT_SECRET"]) {
+		t.Fatal("凭据应保存在独立 .env 变量中")
+	}
+	configRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range testCredValues["wecom"] {
+		if strings.Contains(string(configRaw), secret) {
+			t.Fatal("原始凭据不得出现在 config.json")
+		}
+	}
+	var root map[string]any
+	if err := json.Unmarshal(configRaw, &root); err != nil {
+		t.Fatal(err)
+	}
+	bots := root["wecom"].(map[string]any)["bots"].([]any)
+	if len(bots) != 2 {
+		t.Fatal("其他命名机器人配置必须保留")
+	}
+	if reloads != 1 {
+		t.Fatal("写入校验通过后才应热重载")
+	}
+}
+
 func TestSetCredentialsReloadFailedStillWroteEnv(t *testing.T) {
 	path := tempEnvPath(t)
 	res, _ := SetCredentials("tencent-docs", testCredValues["tencent-docs"], CredOptions{
@@ -180,7 +227,7 @@ func TestCapturePhaseMapping(t *testing.T) {
 			t.Fatalf("%s 的 next 未给出 set_credentials 降级路径", phase)
 		}
 	}
-	if !strings.Contains(captureNext("write_failed"), "写权限") {
-		t.Fatal("write_failed 的 next 应明确指向工作目录写权限")
+	if !strings.Contains(captureNext("write_failed"), "配置引用") {
+		t.Fatal("write_failed 的 next 应明确指向本地配置与引用修复")
 	}
 }
